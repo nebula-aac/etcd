@@ -22,11 +22,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"go.etcd.io/raft/v3"
-
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 	"go.etcd.io/etcd/tests/v3/framework/interfaces"
+	"go.etcd.io/raft/v3"
 )
 
 func TestGracefulShutdown(t *testing.T) {
@@ -84,7 +83,7 @@ func tryShutdownLeader(ctx context.Context, t *testing.T, members []interfaces.M
 		time.Sleep(500 * time.Millisecond)
 		resps, err := followers[0].Client().Status(ctx)
 		require.NoError(t, err)
-		require.NotEqual(t, leaderID, raft.None)
+		require.NotEqual(t, raft.None, leaderID)
 		require.Equal(t, resps[0].RaftTerm, term+1)
 		require.NotEqualf(t, resps[0].Leader, leaderID, "expect old leaderID %x changed to new leader ID %x", leaderID, resps[0].Leader)
 

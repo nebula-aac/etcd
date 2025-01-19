@@ -17,10 +17,12 @@ package integration
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -64,7 +66,7 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 		t.Fatal(err)
 	}
 	cli, cerr := integration.NewClient(t, clientv3.Config{
-		Endpoints:   []string{clus.Members[0].GRPCURL()},
+		Endpoints:   []string{clus.Members[0].GRPCURL},
 		DialTimeout: time.Second,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 		TLS:         cc,
@@ -72,7 +74,7 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 	if cli != nil {
 		cli.Close()
 	}
-	if !valid && cerr != context.DeadlineExceeded {
+	if !valid && !errors.Is(cerr, context.DeadlineExceeded) {
 		t.Fatalf("expected %v with TLS handshake failure, got %v", context.DeadlineExceeded, cerr)
 	}
 	if valid && cerr != nil {
@@ -122,19 +124,19 @@ func TestTLSMinMaxVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cc, err := integration.TestTLSInfo.ClientConfig()
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			cc.MinVersion = tt.minVersion
 			cc.MaxVersion = tt.maxVersion
 			cli, cerr := integration.NewClient(t, clientv3.Config{
-				Endpoints:   []string{clus.Members[0].GRPCURL()},
+				Endpoints:   []string{clus.Members[0].GRPCURL},
 				DialTimeout: time.Second,
 				DialOptions: []grpc.DialOption{grpc.WithBlock()},
 				TLS:         cc,
 			})
 			if cerr != nil {
-				assert.True(t, tt.expectError, "got TLS handshake error while expecting success: %v", cerr)
-				assert.Equal(t, context.DeadlineExceeded, cerr, "expected %v with TLS handshake failure, got %v", context.DeadlineExceeded, cerr)
+				assert.Truef(t, tt.expectError, "got TLS handshake error while expecting success: %v", cerr)
+				assert.Equal(t, context.DeadlineExceeded, cerr)
 				return
 			}
 

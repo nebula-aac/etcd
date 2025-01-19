@@ -34,6 +34,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.etcd.io/etcd/client/pkg/v3/verify"
 	"go.etcd.io/etcd/client/v3/credentials"
 	"go.etcd.io/etcd/client/v3/internal/endpoint"
 	"go.etcd.io/etcd/client/v3/internal/resolver"
@@ -91,7 +92,7 @@ func New(cfg Config) (*Client, error) {
 // service interface implementations and do not need connection management.
 func NewCtxClient(ctx context.Context, opts ...Option) *Client {
 	cctx, cancel := context.WithCancel(ctx)
-	c := &Client{ctx: cctx, cancel: cancel, lgMu: new(sync.RWMutex)}
+	c := &Client{ctx: cctx, cancel: cancel, lgMu: new(sync.RWMutex), epMu: new(sync.RWMutex)}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -153,7 +154,7 @@ func (c *Client) Close() error {
 		c.Lease.Close()
 	}
 	if c.conn != nil {
-		return toErr(c.ctx, c.conn.Close())
+		return ContextError(c.ctx, c.conn.Close())
 	}
 	return c.ctx.Err()
 }
@@ -194,6 +195,13 @@ func (c *Client) Sync(ctx context.Context) error {
 			eps = append(eps, m.ClientURLs...)
 		}
 	}
+	// The linearizable `MemberList` returned successfully, so the
+	// endpoints shouldn't be empty.
+	verify.Verify(func() {
+		if len(eps) == 0 {
+			panic("empty endpoints returned from etcd cluster")
+		}
+	})
 	c.SetEndpoints(eps...)
 	c.lg.Debug("set etcd endpoints by autoSync", zap.Strings("endpoints", eps))
 	return nil
@@ -212,7 +220,7 @@ func (c *Client) autoSync() {
 			ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 			err := c.Sync(ctx)
 			cancel()
-			if err != nil && err != c.ctx.Err() {
+			if err != nil && !errors.Is(err, c.ctx.Err()) {
 				c.lg.Info("Auto sync endpoints failed.", zap.Error(err))
 			}
 		}
@@ -220,7 +228,9 @@ func (c *Client) autoSync() {
 }
 
 // dialSetupOpts gives the dial opts prior to any authentication.
-func (c *Client) dialSetupOpts(creds grpccredentials.TransportCredentials, dopts ...grpc.DialOption) (opts []grpc.DialOption, err error) {
+func (c *Client) dialSetupOpts(creds grpccredentials.TransportCredentials, dopts ...grpc.DialOption) []grpc.DialOption {
+	var opts []grpc.DialOption
+
 	if c.cfg.DialKeepAliveTime > 0 {
 		params := keepalive.ClientParameters{
 			Time:                c.cfg.DialKeepAliveTime,
@@ -237,18 +247,33 @@ func (c *Client) dialSetupOpts(creds grpccredentials.TransportCredentials, dopts
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
+	unaryMaxRetries := defaultUnaryMaxRetries
+	if c.cfg.MaxUnaryRetries > 0 {
+		unaryMaxRetries = c.cfg.MaxUnaryRetries
+	}
+
+	backoffWaitBetween := defaultBackoffWaitBetween
+	if c.cfg.BackoffWaitBetween > 0 {
+		backoffWaitBetween = c.cfg.BackoffWaitBetween
+	}
+
+	backoffJitterFraction := defaultBackoffJitterFraction
+	if c.cfg.BackoffJitterFraction > 0 {
+		backoffJitterFraction = c.cfg.BackoffJitterFraction
+	}
+
 	// Interceptor retry and backoff.
 	// TODO: Replace all of clientv3/retry.go with RetryPolicy:
 	// https://github.com/grpc/grpc-proto/blob/cdd9ed5c3d3f87aef62f373b93361cf7bddc620d/grpc/service_config/service_config.proto#L130
-	rrBackoff := withBackoff(c.roundRobinQuorumBackoff(defaultBackoffWaitBetween, defaultBackoffJitterFraction))
+	rrBackoff := withBackoff(c.roundRobinQuorumBackoff(backoffWaitBetween, backoffJitterFraction))
 	opts = append(opts,
 		// Disable stream retry by default since go-grpc-middleware/retry does not support client streams.
 		// Streams that are safe to retry are enabled individually.
 		grpc.WithStreamInterceptor(c.streamClientInterceptor(withMax(0), rrBackoff)),
-		grpc.WithUnaryInterceptor(c.unaryClientInterceptor(withMax(defaultUnaryMaxRetries), rrBackoff)),
+		grpc.WithUnaryInterceptor(c.unaryClientInterceptor(withMax(unaryMaxRetries), rrBackoff)),
 	)
 
-	return opts, nil
+	return opts
 }
 
 // Dial connects to a single endpoint using the client's config.
@@ -269,7 +294,7 @@ func (c *Client) getToken(ctx context.Context) error {
 
 	resp, err := c.Auth.Authenticate(ctx, c.Username, c.Password)
 	if err != nil {
-		if err == rpctypes.ErrAuthNotEnabled {
+		if errors.Is(err, rpctypes.ErrAuthNotEnabled) {
 			c.authTokenBundle.UpdateAuthToken("")
 			return nil
 		}
@@ -289,10 +314,8 @@ func (c *Client) dialWithBalancer(dopts ...grpc.DialOption) (*grpc.ClientConn, e
 
 // dial configures and dials any grpc balancer target.
 func (c *Client) dial(creds grpccredentials.TransportCredentials, dopts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	opts, err := c.dialSetupOpts(creds, dopts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to configure dialer: %v", err)
-	}
+	opts := c.dialSetupOpts(creds, dopts...)
+
 	if c.authTokenBundle != nil {
 		opts = append(opts, grpc.WithPerRPCCredentials(c.authTokenBundle.PerRPCCredentials()))
 	}
@@ -330,11 +353,11 @@ func authority(endpoint string) string {
 func (c *Client) credentialsForEndpoint(ep string) grpccredentials.TransportCredentials {
 	r := endpoint.RequiresCredentials(ep)
 	switch r {
-	case endpoint.CREDS_DROP:
+	case endpoint.CredsDrop:
 		return nil
-	case endpoint.CREDS_OPTIONAL:
+	case endpoint.CredsOptional:
 		return c.creds
-	case endpoint.CREDS_REQUIRE:
+	case endpoint.CredsRequire:
 		if c.creds != nil {
 			return c.creds
 		}
@@ -435,7 +458,7 @@ func newClient(cfg *Config) (*Client, error) {
 	client.Auth = NewAuth(client)
 	client.Maintenance = NewMaintenance(client)
 
-	//get token with established connection
+	// get token with established connection
 	ctx, cancel = client.ctx, func() {}
 	if client.cfg.DialTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, client.cfg.DialTimeout)
@@ -444,7 +467,7 @@ func newClient(cfg *Config) (*Client, error) {
 	if err != nil {
 		client.Close()
 		cancel()
-		//TODO: Consider fmt.Errorf("communicating with [%s] failed: %v", strings.Join(cfg.Endpoints, ";"), err)
+		// TODO: Consider fmt.Errorf("communicating with [%s] failed: %v", strings.Join(cfg.Endpoints, ";"), err)
 		return nil, err
 	}
 	cancel()
@@ -575,12 +598,15 @@ func isUnavailableErr(ctx context.Context, err error) bool {
 	return false
 }
 
-func toErr(ctx context.Context, err error) error {
+// ContextError converts the error into an EtcdError if the error message matches one of
+// the defined messages; otherwise, it tries to retrieve the context error.
+func ContextError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
 	err = rpctypes.Error(err)
-	if _, ok := err.(rpctypes.EtcdError); ok {
+	var serverErr rpctypes.EtcdError
+	if errors.As(err, &serverErr) {
 		return err
 	}
 	if ev, ok := status.FromError(err); ok {
@@ -602,7 +628,7 @@ func canceledByCaller(stopCtx context.Context, err error) bool {
 		return false
 	}
 
-	return err == context.Canceled || err == context.DeadlineExceeded
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // IsConnCanceled returns true, if error is from a closed gRPC connection.
@@ -620,7 +646,7 @@ func IsConnCanceled(err error) bool {
 	}
 
 	// >= gRPC v1.10.x
-	if err == context.Canceled {
+	if errors.Is(err, context.Canceled) {
 		return true
 	}
 

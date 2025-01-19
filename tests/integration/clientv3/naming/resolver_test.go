@@ -22,26 +22,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
 	"go.etcd.io/etcd/client/v3/naming/resolver"
-	"go.etcd.io/etcd/pkg/v3/grpc_testing"
+	"go.etcd.io/etcd/pkg/v3/grpctesting"
 	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
-func testEtcdGrpcResolver(t *testing.T, lbPolicy string) {
-
+func testEtcdGRPCResolver(t *testing.T, lbPolicy string) {
 	// Setup two new dummy stub servers
 	payloadBody := []byte{'1'}
-	s1 := grpc_testing.NewDummyStubServer(payloadBody)
+	s1 := grpctesting.NewDummyStubServer(payloadBody)
 	if err := s1.Start(nil); err != nil {
 		t.Fatal("failed to start dummy grpc server (s1)", err)
 	}
 	defer s1.Stop()
 
-	s2 := grpc_testing.NewDummyStubServer(payloadBody)
+	s2 := grpctesting.NewDummyStubServer(payloadBody)
 	if err := s2.Start(nil); err != nil {
 		t.Fatal("failed to start dummy grpc server (s2)", err)
 	}
@@ -75,7 +76,7 @@ func testEtcdGrpcResolver(t *testing.T, lbPolicy string) {
 	}
 
 	// Create connection with provided lb policy
-	conn, err := grpc.Dial("etcd:///foo", grpc.WithInsecure(), grpc.WithResolvers(b),
+	conn, err := grpc.Dial("etcd:///foo", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithResolvers(b),
 		grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingPolicy":"%s"}`, lbPolicy)))
 	if err != nil {
 		t.Fatal("failed to connect to foo", err)
@@ -113,7 +114,7 @@ func testEtcdGrpcResolver(t *testing.T, lbPolicy string) {
 	t.Logf("Last response: %v", string(lastResponse))
 	if lbPolicy == "pick_first" {
 		if string(lastResponse) != "3500" {
-			t.Fatalf("unexpected total responses from foo: %s", string(lastResponse))
+			t.Fatalf("unexpected total responses from foo: %s", lastResponse)
 		}
 	}
 
@@ -121,46 +122,44 @@ func testEtcdGrpcResolver(t *testing.T, lbPolicy string) {
 	if lbPolicy == "round_robin" {
 		responses, err := strconv.Atoi(string(lastResponse))
 		if err != nil {
-			t.Fatalf("couldn't convert to int: %s", string(lastResponse))
+			t.Fatalf("couldn't convert to int: %s", lastResponse)
 		}
 
 		// Allow 25% tolerance as round robin is not perfect and we don't want the test to flake
 		expected := float64(totalRequests) * 0.5
-		assert.InEpsilon(t, float64(expected), float64(responses), 0.25, "unexpected total responses from foo: %s", string(lastResponse))
+		assert.InEpsilonf(t, expected, float64(responses), 0.25, "unexpected total responses from foo: %s", lastResponse)
 	}
 }
 
 // TestEtcdGrpcResolverPickFirst mimics scenarios described in grpc_naming.md doc.
 func TestEtcdGrpcResolverPickFirst(t *testing.T) {
-
 	integration2.BeforeTest(t)
 
 	// Pick first is the default load balancer policy for grpc-go
-	testEtcdGrpcResolver(t, "pick_first")
+	testEtcdGRPCResolver(t, "pick_first")
 }
 
 // TestEtcdGrpcResolverRoundRobin mimics scenarios described in grpc_naming.md doc.
 func TestEtcdGrpcResolverRoundRobin(t *testing.T) {
-
 	integration2.BeforeTest(t)
 
 	// Round robin is a common alternative for more production oriented scenarios
-	testEtcdGrpcResolver(t, "round_robin")
+	testEtcdGRPCResolver(t, "round_robin")
 }
 
 func TestEtcdEndpointManager(t *testing.T) {
 	integration2.BeforeTest(t)
 
 	s1PayloadBody := []byte{'1'}
-	s1 := grpc_testing.NewDummyStubServer(s1PayloadBody)
+	s1 := grpctesting.NewDummyStubServer(s1PayloadBody)
 	err := s1.Start(nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer s1.Stop()
 
 	s2PayloadBody := []byte{'2'}
-	s2 := grpc_testing.NewDummyStubServer(s2PayloadBody)
+	s2 := grpctesting.NewDummyStubServer(s2PayloadBody)
 	err = s2.Start(nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer s2.Stop()
 
 	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
@@ -168,9 +167,9 @@ func TestEtcdEndpointManager(t *testing.T) {
 
 	// Check if any endpoint with the same prefix "foo" will not break the logic with multiple endpoints
 	em, err := endpoints.NewManager(clus.Client(0), "foo")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	emOther, err := endpoints.NewManager(clus.Client(1), "foo_other")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	e1 := endpoints.Endpoint{Addr: s1.Addr()}
 	e2 := endpoints.Endpoint{Addr: s2.Addr()}
@@ -179,9 +178,9 @@ func TestEtcdEndpointManager(t *testing.T) {
 	emOther.AddEndpoint(context.Background(), "foo_other/e2", e2)
 
 	epts, err := em.List(context.Background())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	eptsOther, err := emOther.List(context.Background())
-	assert.NoError(t, err)
-	assert.Equal(t, len(epts), 1)
-	assert.Equal(t, len(eptsOther), 1)
+	require.NoError(t, err)
+	assert.Len(t, epts, 1)
+	assert.Len(t, eptsOther, 1)
 }

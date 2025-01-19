@@ -74,7 +74,8 @@ func checkKeyInterval(
 	lg *zap.Logger,
 	cachedPerms *unifiedRangePermissions,
 	key, rangeEnd []byte,
-	permtyp authpb.Permission_Type) bool {
+	permtyp authpb.Permission_Type,
+) bool {
 	if isOpenEnded(rangeEnd) {
 		rangeEnd = nil
 		// nil rangeEnd will be converetd to []byte{}, the largest element of BytesAffineComparable,
@@ -189,7 +190,7 @@ func isValidPermissionRange(key, rangeEnd []byte) bool {
 	if len(key) == 0 {
 		return false
 	}
-	if rangeEnd == nil || len(rangeEnd) == 0 { // ensure rule b1
+	if len(rangeEnd) == 0 { // ensure rule b1
 		return true
 	}
 
@@ -199,9 +200,5 @@ func isValidPermissionRange(key, rangeEnd []byte) bool {
 		return true
 	}
 
-	if isOpenEnded(rangeEnd) {
-		return true
-	}
-
-	return false
+	return isOpenEnded(rangeEnd)
 }

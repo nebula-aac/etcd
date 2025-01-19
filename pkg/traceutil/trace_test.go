@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 )
 
@@ -40,7 +42,7 @@ func TestGet(t *testing.T) {
 		},
 		{
 			name:        "When the context has trace",
-			inputCtx:    context.WithValue(context.Background(), TraceKey, traceForTest),
+			inputCtx:    context.WithValue(context.Background(), TraceKey{}, traceForTest),
 			outputTrace: traceForTest,
 		},
 	}
@@ -51,7 +53,7 @@ func TestGet(t *testing.T) {
 			if trace == nil {
 				t.Errorf("Expected %v; Got nil", tt.outputTrace)
 			}
-			if trace.operation != tt.outputTrace.operation {
+			if tt.outputTrace == nil || trace.operation != tt.outputTrace.operation {
 				t.Errorf("Expected %v; Got %v", tt.outputTrace, trace)
 			}
 		})
@@ -215,9 +217,7 @@ func TestLog(t *testing.T) {
 			tt.trace.lg = lg
 			tt.trace.Log()
 			data, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			for _, msg := range tt.expectedMsg {
 				if !bytes.Contains(data, []byte(msg)) {
@@ -293,9 +293,7 @@ func TestLogIfLong(t *testing.T) {
 			tt.trace.lg = lg
 			tt.trace.LogIfLong(tt.threshold)
 			data, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			for _, msg := range tt.expectedMsg {
 				if !bytes.Contains(data, []byte(msg)) {
 					t.Errorf("Expected to find %v in log", msg)

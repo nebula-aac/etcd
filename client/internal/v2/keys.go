@@ -79,9 +79,7 @@ const (
 	PrevNoExist = PrevExistType("false")
 )
 
-var (
-	defaultV2KeysPrefix = "/v2/keys"
-)
+var defaultV2KeysPrefix = "/v2/keys"
 
 // NewKeysAPI builds a KeysAPI that interacts with etcd's key-value
 // API over HTTP.
@@ -459,7 +457,7 @@ func (hw *httpWatcher) Next(ctx context.Context) (*Response, error) {
 
 		resp, err := unmarshalHTTPResponse(httpresp.StatusCode, httpresp.Header, body)
 		if err != nil {
-			if err == ErrEmptyBody {
+			if errors.Is(err, ErrEmptyBody) {
 				continue
 			}
 			return nil, err

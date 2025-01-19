@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -40,7 +41,7 @@ func Put(ctx context.Context, lg *zap.Logger, lessor lease.Lessor, kv mvcc.KV, p
 			traceutil.Field{Key: "key", Value: string(p.Key)},
 			traceutil.Field{Key: "req_size", Value: p.Size()},
 		)
-		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
+		ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
 	}
 	leaseID := lease.LeaseID(p.Lease)
 	if leaseID != lease.NoLease {
@@ -102,7 +103,7 @@ func DeleteRange(ctx context.Context, lg *zap.Logger, kv mvcc.KV, dr *pb.DeleteR
 			traceutil.Field{Key: "key", Value: string(dr.Key)},
 			traceutil.Field{Key: "range_end", Value: string(dr.RangeEnd)},
 		)
-		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
+		ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
 	}
 	txnWrite := kv.Write(trace)
 	defer txnWrite.End()
@@ -136,8 +137,12 @@ func Range(ctx context.Context, lg *zap.Logger, kv mvcc.KV, r *pb.RangeRequest) 
 	trace = traceutil.Get(ctx)
 	if trace.IsEmpty() {
 		trace = traceutil.New("range", lg)
-		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
+		ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
 	}
+	defer func(start time.Time) {
+		success := err == nil
+		RangeSecObserve(success, time.Since(start))
+	}(time.Now())
 	txnRead := kv.Read(mvcc.ConcurrentReadTxMode, trace)
 	defer txnRead.End()
 	resp, err = executeRange(ctx, lg, txnRead, r)
@@ -248,13 +253,13 @@ func Txn(ctx context.Context, lg *zap.Logger, rt *pb.TxnRequest, txnModeWriteWit
 	trace := traceutil.Get(ctx)
 	if trace.IsEmpty() {
 		trace = traceutil.New("transaction", lg)
-		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
+		ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
 	}
 	isWrite := !IsTxnReadonly(rt)
 	// When the transaction contains write operations, we use ReadTx instead of
 	// ConcurrentReadTx to avoid extra overhead of copying buffer.
 	var mode mvcc.ReadTxMode
-	if isWrite && txnModeWriteWithSharedBuffer /*a.s.Cfg.ExperimentalTxnModeWriteWithSharedBuffer*/ {
+	if isWrite && txnModeWriteWithSharedBuffer /*a.s.Cfg.ServerFeatureGate.Enabled(features.TxnModeWriteWithSharedBuffer)*/ {
 		mode = mvcc.SharedBufReadTxMode
 	} else {
 		mode = mvcc.ConcurrentReadTxMode
@@ -267,11 +272,15 @@ func Txn(ctx context.Context, lg *zap.Logger, rt *pb.TxnRequest, txnModeWriteWit
 		},
 		"compare",
 	)
-	err := checkTxn(ctx, txnRead, rt, isWrite, lessor, txnPath)
+	if isWrite {
+		trace.AddField(traceutil.Field{Key: "read_only", Value: false})
+	}
+	_, err := checkTxn(txnRead, rt, lessor, txnPath)
 	if err != nil {
 		txnRead.End()
 		return nil, nil, err
 	}
+	trace.Step("check requests")
 	// When executing mutable txnWrite ops, etcd must hold the txnWrite lock so
 	// readers do not see any intermediate results. Since writes are
 	// serialized on the raft loop, the revision in the read view will
@@ -293,31 +302,16 @@ func Txn(ctx context.Context, lg *zap.Logger, rt *pb.TxnRequest, txnModeWriteWit
 	return txnResp, trace, err
 }
 
-func checkTxn(ctx context.Context, txnRead mvcc.TxnRead, rt *pb.TxnRequest, isWrite bool, lessor lease.Lessor, txnPath []bool) error {
-	trace := traceutil.Get(ctx)
-	if isWrite {
-		trace.AddField(traceutil.Field{Key: "read_only", Value: false})
-		if _, err := checkRequests(txnRead, rt, txnPath,
-			func(rv mvcc.ReadView, ro *pb.RequestOp) error { return checkRequestPut(rv, lessor, ro) }); err != nil {
-			return err
-		}
-	}
-	if _, err := checkRequests(txnRead, rt, txnPath, checkRequestRange); err != nil {
-		return err
-	}
-	trace.Step("check requests")
-	return nil
-}
-
 func txn(ctx context.Context, lg *zap.Logger, txnWrite mvcc.TxnWrite, rt *pb.TxnRequest, isWrite bool, txnPath []bool) (*pb.TxnResponse, error) {
 	txnResp, _ := newTxnResp(rt, txnPath)
 	_, err := executeTxn(ctx, lg, txnWrite, rt, txnPath, txnResp)
 	if err != nil {
 		if isWrite {
-			// end txn to release locks before panic
-			txnWrite.End()
-			// When txn with write operations starts it has to be successful
-			// We don't have a way to recover state in case of write failure
+			// CAUTION: When a txn performing write operations starts, we always expect it to be successful.
+			// If a write failure is seen we SHOULD NOT try to recover the server, but crash with a panic to make the failure explicit.
+			// Trying to silently recover (e.g by ignoring the failed txn or calling txn.End() early) poses serious risks:
+			// - violation of transaction atomicity if some write operations have been partially executed
+			// - data inconsistency across different etcd members if they applied the txn asymmetrically
 			lg.Panic("unexpected error during txn with writes", zap.Error(err))
 		} else {
 			lg.Error("unexpected error during readonly txn", zap.Error(err))
@@ -416,16 +410,7 @@ func executeTxn(ctx context.Context, lg *zap.Logger, txnWrite mvcc.TxnWrite, rt 
 	return txns, nil
 }
 
-//---------------------------------------------------------
-
-type checkReqFunc func(mvcc.ReadView, *pb.RequestOp) error
-
-func checkRequestPut(rv mvcc.ReadView, lessor lease.Lessor, reqOp *pb.RequestOp) error {
-	tv, ok := reqOp.Request.(*pb.RequestOp_RequestPut)
-	if !ok || tv.RequestPut == nil {
-		return nil
-	}
-	req := tv.RequestPut
+func checkPut(rv mvcc.ReadView, lessor lease.Lessor, req *pb.PutRequest) error {
 	if req.IgnoreValue || req.IgnoreLease {
 		// expects previous key-value, error if not exist
 		rr, err := rv.Range(context.TODO(), req.Key, nil, mvcc.RangeOptions{})
@@ -444,12 +429,7 @@ func checkRequestPut(rv mvcc.ReadView, lessor lease.Lessor, reqOp *pb.RequestOp)
 	return nil
 }
 
-func checkRequestRange(rv mvcc.ReadView, reqOp *pb.RequestOp) error {
-	tv, ok := reqOp.Request.(*pb.RequestOp_RequestRange)
-	if !ok || tv.RequestRange == nil {
-		return nil
-	}
-	req := tv.RequestRange
+func checkRange(rv mvcc.ReadView, req *pb.RangeRequest) error {
 	switch {
 	case req.Revision == 0:
 		return nil
@@ -461,23 +441,29 @@ func checkRequestRange(rv mvcc.ReadView, reqOp *pb.RequestOp) error {
 	return nil
 }
 
-func checkRequests(rv mvcc.ReadView, rt *pb.TxnRequest, txnPath []bool, f checkReqFunc) (int, error) {
+func checkTxn(rv mvcc.ReadView, rt *pb.TxnRequest, lessor lease.Lessor, txnPath []bool) (int, error) {
 	txnCount := 0
 	reqs := rt.Success
 	if !txnPath[0] {
 		reqs = rt.Failure
 	}
 	for _, req := range reqs {
-		if tv, ok := req.Request.(*pb.RequestOp_RequestTxn); ok && tv.RequestTxn != nil {
-			txns, err := checkRequests(rv, tv.RequestTxn, txnPath[1:], f)
-			if err != nil {
-				return 0, err
-			}
+		var err error
+		var txns int
+		switch tv := req.Request.(type) {
+		case *pb.RequestOp_RequestRange:
+			err = checkRange(rv, tv.RequestRange)
+		case *pb.RequestOp_RequestPut:
+			err = checkPut(rv, lessor, tv.RequestPut)
+		case *pb.RequestOp_RequestDeleteRange:
+		case *pb.RequestOp_RequestTxn:
+			txns, err = checkTxn(rv, tv.RequestTxn, lessor, txnPath[1:])
 			txnCount += txns + 1
 			txnPath = txnPath[txns+1:]
-			continue
+		default:
+			// empty union
 		}
-		if err := f(rv, req); err != nil {
+		if err != nil {
 			return 0, err
 		}
 	}

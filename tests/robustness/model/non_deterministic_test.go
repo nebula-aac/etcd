@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
@@ -335,9 +336,7 @@ func TestModelNonDeterministic(t *testing.T) {
 					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, NonDeterministicModel.DescribeOperation(op.req, op.resp))
 					var loadedState nonDeterministicState
 					err := json.Unmarshal([]byte(state.(string)), &loadedState)
-					if err != nil {
-						t.Fatalf("Failed to load state: %v", err)
-					}
+					require.NoErrorf(t, err, "Failed to load state")
 					for i, s := range loadedState {
 						_, resp := s.Step(op.req)
 						t.Errorf("For state %d, response diff: %s", i, cmp.Diff(op.resp, resp))
@@ -391,7 +390,7 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       getResponse("key", "a", 1, 1),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(2),
 			expectMatch: false,
 		},
 		{
@@ -416,8 +415,13 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       putResponse(3),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(1),
 			expectMatch: false,
+		},
+		{
+			resp1:       putResponse(3),
+			resp2:       partialResponse(0),
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(1, 5),
@@ -446,13 +450,18 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       deleteResponse(0, 5),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(4),
 			expectMatch: false,
+		},
+		{
+			resp1:       deleteResponse(0, 5),
+			resp2:       partialResponse(0),
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(1, 5),
 			resp2:       partialResponse(0),
-			expectMatch: false,
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(0, 5),
@@ -491,16 +500,76 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       compareRevisionAndPutResponse(true, 7),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(4),
+			expectMatch: false,
+		},
+		{
+			resp1:       compareRevisionAndPutResponse(false, 7),
+			resp2:       partialResponse(3),
 			expectMatch: false,
 		},
 		{
 			resp1:       compareRevisionAndPutResponse(false, 7),
 			resp2:       partialResponse(0),
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{EtcdResponse: EtcdResponse{Revision: 1, Txn: &TxnResponse{Failure: false, Results: []EtcdOperationResult{{Deleted: 1}}}}},
+			resp2:       failedResponse(errors.New("failed request")),
+			expectMatch: false,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request 1")),
+			resp2:       failedResponse(errors.New("failed request 2")),
+			expectMatch: false,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       failedResponse(errors.New("failed request")),
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true},
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 3},
+			expectMatch: false,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       MaybeEtcdResponse{Persisted: true},
+			expectMatch: true,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 1},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
 			expectMatch: false,
 		},
 	}
 	for i, tc := range tcs {
-		assert.Equal(t, tc.expectMatch, Match(tc.resp1, tc.resp2), "%d %+v %+v", i, tc.resp1, tc.resp2)
+		assert.Equalf(t, tc.expectMatch, Match(tc.resp1, tc.resp2), "%d %+v %+v", i, tc.resp1, tc.resp2)
 	}
 }

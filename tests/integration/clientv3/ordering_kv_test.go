@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/ordering"
@@ -28,7 +29,7 @@ import (
 )
 
 func TestDetectKvOrderViolation(t *testing.T) {
-	var errOrderViolation = errors.New("DetectedOrderViolation")
+	errOrderViolation := errors.New("DetectedOrderViolation")
 
 	integration2.BeforeTest(t)
 	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
@@ -36,9 +37,9 @@ func TestDetectKvOrderViolation(t *testing.T) {
 
 	cfg := clientv3.Config{
 		Endpoints: []string{
-			clus.Members[0].GRPCURL(),
-			clus.Members[1].GRPCURL(),
-			clus.Members[2].GRPCURL(),
+			clus.Members[0].GRPCURL,
+			clus.Members[1].GRPCURL,
+			clus.Members[2].GRPCURL,
 		},
 	}
 	cli, err := integration2.NewClient(t, cfg)
@@ -81,21 +82,21 @@ func TestDetectKvOrderViolation(t *testing.T) {
 	// ensure that only the third member is queried during requests
 	clus.Members[0].Stop(t)
 	clus.Members[1].Stop(t)
-	assert.NoError(t, clus.Members[2].Restart(t))
+	require.NoError(t, clus.Members[2].Restart(t))
 	// force OrderingKv to query the third member
-	cli.SetEndpoints(clus.Members[2].GRPCURL())
+	cli.SetEndpoints(clus.Members[2].GRPCURL)
 	time.Sleep(2 * time.Second) // FIXME: Figure out how pause SetEndpoints sufficiently that this is not needed
 
 	t.Logf("Quering m2 after restart")
 	v, err = orderingKv.Get(ctx, "foo", clientv3.WithSerializable())
-	t.Logf("Quering m2 returned: v:%v erro:%v ", v, err)
-	if err != errOrderViolation {
+	t.Logf("Quering m2 returned: v:%v err:%v ", v, err)
+	if !errors.Is(err, errOrderViolation) {
 		t.Fatalf("expected %v, got err:%v v:%v", errOrderViolation, err, v)
 	}
 }
 
 func TestDetectTxnOrderViolation(t *testing.T) {
-	var errOrderViolation = errors.New("DetectedOrderViolation")
+	errOrderViolation := errors.New("DetectedOrderViolation")
 
 	integration2.BeforeTest(t)
 	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
@@ -103,9 +104,9 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 
 	cfg := clientv3.Config{
 		Endpoints: []string{
-			clus.Members[0].GRPCURL(),
-			clus.Members[1].GRPCURL(),
-			clus.Members[2].GRPCURL(),
+			clus.Members[0].GRPCURL,
+			clus.Members[1].GRPCURL,
+			clus.Members[2].GRPCURL,
 		},
 	}
 	cli, err := integration2.NewClient(t, cfg)
@@ -150,12 +151,12 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 	// ensure that only the third member is queried during requests
 	clus.Members[0].Stop(t)
 	clus.Members[1].Stop(t)
-	assert.NoError(t, clus.Members[2].Restart(t))
+	require.NoError(t, clus.Members[2].Restart(t))
 	// force OrderingKv to query the third member
-	cli.SetEndpoints(clus.Members[2].GRPCURL())
+	cli.SetEndpoints(clus.Members[2].GRPCURL)
 	time.Sleep(2 * time.Second) // FIXME: Figure out how pause SetEndpoints sufficiently that this is not needed
 	_, err = orderingKv.Get(ctx, "foo", clientv3.WithSerializable())
-	if err != errOrderViolation {
+	if !errors.Is(err, errOrderViolation) {
 		t.Fatalf("expected %v, got %v", errOrderViolation, err)
 	}
 	orderingTxn = orderingKv.Txn(ctx)
@@ -164,7 +165,7 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 	).Then(
 		clientv3.OpGet("foo", clientv3.WithSerializable()),
 	).Commit()
-	if err != errOrderViolation {
+	if !errors.Is(err, errOrderViolation) {
 		t.Fatalf("expected %v, got %v", errOrderViolation, err)
 	}
 }

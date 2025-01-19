@@ -73,7 +73,7 @@ func SpawnWithExpectLines(ctx context.Context, args []string, envVars map[string
 		l, lerr := proc.ExpectWithContext(ctx, txt)
 		if lerr != nil {
 			proc.Close()
-			return nil, fmt.Errorf("%v %v (expected %q, got %q). Try EXPECT_DEBUG=TRUE", args, lerr, txt.Value, lines)
+			return nil, fmt.Errorf("%v %w (expected %q, got %q). Try EXPECT_DEBUG=TRUE", args, lerr, txt.Value, lines)
 		}
 		lines = append(lines, l)
 	}
@@ -108,7 +108,7 @@ func RandomLeaseID() int64 {
 	return rand.New(rand.NewSource(time.Now().UnixNano())).Int63()
 }
 
-func DataMarshal(data interface{}) (d string, e error) {
+func DataMarshal(data any) (d string, e error) {
 	m, err := json.Marshal(data)
 	if err != nil {
 		return "", err

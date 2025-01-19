@@ -38,7 +38,7 @@ type CURLReq struct {
 	Header   string
 
 	Ciphers     string
-	HttpVersion string
+	HTTPVersion string
 
 	OutputFile string
 }
@@ -59,11 +59,9 @@ func CURLPrefixArgsCluster(cfg *EtcdProcessClusterConfig, member EtcdProcess, me
 }
 
 func CURLPrefixArgs(clientURL string, cfg ClientConfig, CN bool, method string, req CURLReq) []string {
-	var (
-		cmdArgs = []string{"curl"}
-	)
-	if req.HttpVersion != "" {
-		cmdArgs = append(cmdArgs, "--http"+req.HttpVersion)
+	cmdArgs := []string{"curl"}
+	if req.HTTPVersion != "" {
+		cmdArgs = append(cmdArgs, "--http"+req.HTTPVersion)
 	}
 	if req.IsTLS {
 		if cfg.ConnectionType != ClientTLSAndNonTLS {
@@ -125,8 +123,13 @@ func CURLPut(clus *EtcdProcessCluster, req CURLReq) error {
 }
 
 func CURLGet(clus *EtcdProcessCluster, req CURLReq) error {
+	member := clus.Procs[rand.Intn(clus.Cfg.ClusterSize)]
+	return CURLGetFromMember(clus, member, req)
+}
+
+func CURLGetFromMember(clus *EtcdProcessCluster, member EtcdProcess, req CURLReq) error {
 	ctx, cancel := context.WithTimeout(context.Background(), req.timeoutDuration())
 	defer cancel()
 
-	return SpawnWithExpectsContext(ctx, CURLPrefixArgsCluster(clus.Cfg, clus.Procs[rand.Intn(clus.Cfg.ClusterSize)], "GET", req), nil, req.Expected)
+	return SpawnWithExpectsContext(ctx, CURLPrefixArgsCluster(clus.Cfg, member, "GET", req), nil, req.Expected)
 }

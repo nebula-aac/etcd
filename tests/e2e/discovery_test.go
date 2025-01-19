@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !cluster_proxy
+
 package e2e
 
 import (
@@ -21,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
@@ -57,9 +61,8 @@ func testClusterUsingDiscovery(t *testing.T, size int, peerTLS bool) {
 	dcc := MustNewHTTPClient(t, dc.EndpointsHTTP(), nil)
 	dkapi := client.NewKeysAPI(dcc)
 	ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
-	if _, err := dkapi.Create(ctx, "/_config/size", fmt.Sprintf("%d", size)); err != nil {
-		t.Fatal(err)
-	}
+	_, err = dkapi.Create(ctx, "/_config/size", fmt.Sprintf("%d", size))
+	require.NoError(t, err)
 	cancel()
 
 	c, err := e2e.NewEtcdProcessCluster(context.TODO(), t,
@@ -74,12 +77,8 @@ func testClusterUsingDiscovery(t *testing.T, size int, peerTLS bool) {
 	defer c.Close()
 
 	kubectl := []string{e2e.BinPath.Etcdctl, "--endpoints", strings.Join(c.EndpointsGRPC(), ",")}
-	if err := e2e.SpawnWithExpect(append(kubectl, "put", "key", "value"), expect.ExpectedResponse{Value: "OK"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e2e.SpawnWithExpect(append(kubectl, "get", "key"), expect.ExpectedResponse{Value: "value"}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, e2e.SpawnWithExpect(append(kubectl, "put", "key", "value"), expect.ExpectedResponse{Value: "OK"}))
+	require.NoError(t, e2e.SpawnWithExpect(append(kubectl, "get", "key"), expect.ExpectedResponse{Value: "value"}))
 }
 
 func MustNewHTTPClient(t testutil.TB, eps []string, tls *transport.TLSInfo) client.Client {
@@ -89,17 +88,13 @@ func MustNewHTTPClient(t testutil.TB, eps []string, tls *transport.TLSInfo) clie
 	}
 	cfg := client.Config{Transport: mustNewTransport(t, cfgtls), Endpoints: eps}
 	c, err := client.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	return c
 }
 
 func mustNewTransport(t testutil.TB, tlsInfo transport.TLSInfo) *http.Transport {
 	// tick in integration test is short, so 1s dial timeout could play well.
 	tr, err := transport.NewTimeoutTransport(tlsInfo, time.Second, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	return tr
 }

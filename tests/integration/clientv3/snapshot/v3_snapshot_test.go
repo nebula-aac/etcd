@@ -24,13 +24,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/snapshot"
 	"go.etcd.io/etcd/server/v3/embed"
 	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
-	"go.uber.org/zap/zaptest"
 )
 
 // TestSaveSnapshotFilePermissions ensures that the snapshot is saved with
@@ -92,9 +94,7 @@ func createSnapshotFile(t *testing.T, cfg *embed.Config, kvs []kv) (version stri
 		"Snapshot creation tests are depending on embedded etcd server so are integration-level tests.")
 
 	srv, err := embed.StartEtcd(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() {
 		srv.Close()
 	}()
@@ -106,24 +106,18 @@ func createSnapshotFile(t *testing.T, cfg *embed.Config, kvs []kv) (version stri
 
 	ccfg := clientv3.Config{Endpoints: []string{cfg.AdvertiseClientUrls[0].String()}}
 	cli, err := integration2.NewClient(t, ccfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer cli.Close()
 	for i := range kvs {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.RequestTimeout)
 		_, err = cli.Put(ctx, kvs[i].k, kvs[i].v)
 		cancel()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	}
 
 	dbPath = filepath.Join(t.TempDir(), fmt.Sprintf("snapshot%d.db", time.Now().Nanosecond()))
 	version, err = snapshot.SaveWithVersion(context.Background(), zaptest.NewLogger(t), ccfg, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	return version, dbPath
 }
 

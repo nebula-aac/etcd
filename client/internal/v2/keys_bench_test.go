@@ -20,6 +20,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func createTestNode(size int) *Node {
@@ -49,13 +51,12 @@ func createTestResponse(children, size int) *Response {
 }
 
 func benchmarkResponseUnmarshalling(b *testing.B, children, size int) {
+	b.Helper()
 	header := http.Header{}
 	header.Add("X-Etcd-Index", "123456")
 	response := createTestResponse(children, size)
 	body, err := json.Marshal(response)
-	if err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, err)
 
 	b.ResetTimer()
 	newResponse := new(Response)
@@ -63,7 +64,6 @@ func benchmarkResponseUnmarshalling(b *testing.B, children, size int) {
 		if newResponse, err = unmarshalSuccessfulKeysResponse(header, body); err != nil {
 			b.Errorf("error unmarshalling response (%v)", err)
 		}
-
 	}
 	if !reflect.DeepEqual(response.Node, newResponse.Node) {
 		b.Errorf("Unexpected difference in a parsed response: \n%+v\n%+v", response, newResponse)

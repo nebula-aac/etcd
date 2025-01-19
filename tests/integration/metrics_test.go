@@ -22,8 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/storage"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
@@ -62,9 +65,8 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 	putreq := &pb.PutRequest{Key: []byte("k"), Value: make([]byte, 4096)}
 	for i := 0; i < numPuts; i++ {
 		time.Sleep(10 * time.Millisecond) // to execute multiple backend txn
-		if _, err := kvc.Put(context.TODO(), putreq); err != nil {
-			t.Fatal(err)
-		}
+		_, err := kvc.Put(context.TODO(), putreq)
+		require.NoError(t, err)
 	}
 
 	// wait for backend txn sync
@@ -102,18 +104,19 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 
 	validateAfterCompactionInUse := func() error {
 		// Put to move PendingPages to FreePages
-		if _, err = kvc.Put(context.TODO(), putreq); err != nil {
-			t.Fatal(err)
+		_, verr := kvc.Put(context.TODO(), putreq)
+		if verr != nil {
+			t.Fatal(verr)
 		}
 		time.Sleep(500 * time.Millisecond)
 
-		afterCompactionInUse, err := clus.Members[0].Metric("etcd_mvcc_db_total_size_in_use_in_bytes")
-		if err != nil {
-			t.Fatal(err)
+		afterCompactionInUse, verr := clus.Members[0].Metric("etcd_mvcc_db_total_size_in_use_in_bytes")
+		if verr != nil {
+			t.Fatal(verr)
 		}
-		aciu, err := strconv.Atoi(afterCompactionInUse)
-		if err != nil {
-			t.Fatal(err)
+		aciu, verr := strconv.Atoi(afterCompactionInUse)
+		if verr != nil {
+			t.Fatal(verr)
 		}
 		if biu <= aciu {
 			return fmt.Errorf("expected less than %d, got %d after compaction", biu, aciu)
@@ -125,13 +128,13 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 	// which causes the result to be flaky. Retry 3 times.
 	maxRetry, retry := 3, 0
 	for {
-		err := validateAfterCompactionInUse()
+		err = validateAfterCompactionInUse()
 		if err == nil {
 			break
 		}
 		retry++
 		if retry >= maxRetry {
-			t.Fatalf(err.Error())
+			t.Fatalf("%v", err.Error())
 		}
 	}
 
@@ -209,4 +212,35 @@ func TestMetricsHealth(t *testing.T) {
 	if hv != "0" {
 		t.Fatalf("expected '0' from etcd_server_health_failures, got %q", hv)
 	}
+}
+
+func TestMetricsRangeDurationSeconds(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	client := clus.RandClient()
+
+	keys := []string{
+		"my-namespace/foobar", "my-namespace/foobar1", "namespace/foobar1",
+	}
+	for _, key := range keys {
+		_, err := client.Put(context.Background(), key, "data")
+		require.NoError(t, err)
+	}
+
+	_, err := client.Get(context.Background(), "", clientv3.WithFromKey())
+	require.NoError(t, err)
+
+	rangeDurationSeconds, err := clus.Members[0].Metric("etcd_server_range_duration_seconds")
+	require.NoError(t, err)
+
+	require.NotEmptyf(t, rangeDurationSeconds, "expected a number from etcd_server_range_duration_seconds")
+
+	rangeDuration, err := strconv.ParseFloat(rangeDurationSeconds, 64)
+	require.NoErrorf(t, err, "failed to parse duration: %s", rangeDurationSeconds)
+
+	maxRangeDuration := 600.0
+	require.GreaterOrEqualf(t, rangeDuration, 0.0, "expected etcd_server_range_duration_seconds to be between 0 and %f, got %f", maxRangeDuration, rangeDuration)
+	require.LessOrEqualf(t, rangeDuration, maxRangeDuration, "expected etcd_server_range_duration_seconds to be between 0 and %f, got %f", maxRangeDuration, rangeDuration)
 }

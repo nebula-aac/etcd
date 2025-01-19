@@ -24,14 +24,13 @@ import (
 
 	"go.uber.org/zap/zaptest"
 
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
-
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/mock/mockstorage"
 	serverstorage "go.etcd.io/etcd/server/v3/storage"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestGetIDs(t *testing.T) {
@@ -51,18 +50,36 @@ func TestGetIDs(t *testing.T) {
 		widSet []uint64
 	}{
 		{nil, []raftpb.Entry{}, []uint64{}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{}, []uint64{1}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, removeEntry}, []uint64{1}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, normalEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, normalEntry, updateEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, removeEntry, normalEntry}, []uint64{1}},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{},
+			[]uint64{1},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, removeEntry},
+			[]uint64{1},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, normalEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, normalEntry, updateEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, removeEntry, normalEntry},
+			[]uint64{1},
+		},
 	}
 
 	for i, tt := range tests {
@@ -70,7 +87,7 @@ func TestGetIDs(t *testing.T) {
 		if tt.confState != nil {
 			snap.Metadata.ConfState = *tt.confState
 		}
-		idSet := serverstorage.GetEffectiveNodeIDsFromWalEntries(lg, &snap, tt.ents)
+		idSet := serverstorage.GetEffectiveNodeIDsFromWALEntries(lg, &snap, tt.ents)
 		if !reflect.DeepEqual(idSet, tt.widSet) {
 			t.Errorf("#%d: idset = %#v, want %#v", i, idSet, tt.widSet)
 		}
@@ -208,7 +225,7 @@ func TestConfigChangeBlocksApply(t *testing.T) {
 		updateLead:       func(uint64) {},
 		updateLeadership: func(bool) {},
 	})
-	defer srv.r.Stop()
+	defer srv.r.stop()
 
 	n.readyc <- raft.Ready{
 		SoftState:        &raft.SoftState{RaftState: raft.StateFollower},

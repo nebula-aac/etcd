@@ -16,12 +16,15 @@ package mvcc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -30,9 +33,6 @@ import (
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
-
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 )
 
 // Functional tests for features implemented in v3 store. It treats v3 store
@@ -204,7 +204,7 @@ func testKVRangeBadRev(t *testing.T, f rangeFunc) {
 	}
 	for i, tt := range tests {
 		_, err := f(s, []byte("foo"), []byte("foo3"), RangeOptions{Rev: tt.rev})
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: error = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -627,7 +627,7 @@ func TestKVCompactBad(t *testing.T) {
 	}
 	for i, tt := range tests {
 		_, err := s.Compact(traceutil.TODO(), tt.rev)
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: compact error = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -757,7 +757,7 @@ func TestKVSnapshot(t *testing.T) {
 
 func TestWatchableKVWatch(t *testing.T) {
 	b, _ := betesting.NewDefaultTmpBackend(t)
-	s := WatchableKV(newWatchableStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{}))
+	s := New(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
 	defer cleanup(s, b)
 
 	w := s.NewWatchStream()
@@ -766,7 +766,8 @@ func TestWatchableKVWatch(t *testing.T) {
 	wid, _ := w.Watch(0, []byte("foo"), []byte("fop"), 0)
 
 	wev := []mvccpb.Event{
-		{Type: mvccpb.PUT,
+		{
+			Type: mvccpb.PUT,
 			Kv: &mvccpb.KeyValue{
 				Key:            []byte("foo"),
 				Value:          []byte("bar"),

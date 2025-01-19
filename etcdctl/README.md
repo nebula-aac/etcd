@@ -125,6 +125,14 @@ RPC: Range
 
 - keys-only -- Get only the keys
 
+- max-create-revision -- restrict results to kvs with create revision lower or equal than the supplied revision
+
+- min-create-revision -- restrict results to kvs with create revision greater or equal than the supplied revision
+
+- max-mod-revision -- restrict results to kvs with modified revision lower or equal than the supplied revision
+
+- min-mod-revision -- restrict results to kvs with modified revision greater or equal than the supplied revision
+
 #### Output
 Prints the data in format below,
 ```
@@ -1580,7 +1588,7 @@ Notice that different workload models use different configurations in terms of n
 
 The test checks for the following conditions:
 
-- The throughput should be at least 90% of the issued requets
+- The throughput should be at least 90% of the issued request
 - All the requests should be done in less than 500 ms
 - The standard deviation of the requests should be less than 100 ms
 

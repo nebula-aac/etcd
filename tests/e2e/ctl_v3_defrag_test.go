@@ -17,6 +17,8 @@ package e2e
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/pkg/v3/expect"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
@@ -26,21 +28,10 @@ func TestCtlV3DefragOffline(t *testing.T) {
 }
 
 func maintenanceInitKeys(cx ctlCtx) {
-	var kvs = []kv{{"key", "val1"}, {"key", "val2"}, {"key", "val3"}}
+	kvs := []kv{{"key", "val1"}, {"key", "val2"}, {"key", "val3"}}
 	for i := range kvs {
-		if err := ctlV3Put(cx, kvs[i].key, kvs[i].val, ""); err != nil {
-			cx.t.Fatal(err)
-		}
+		require.NoError(cx.t, ctlV3Put(cx, kvs[i].key, kvs[i].val, ""))
 	}
-}
-
-func ctlV3OnlineDefrag(cx ctlCtx) error {
-	cmdArgs := append(cx.PrefixArgs(), "defrag")
-	lines := make([]expect.ExpectedResponse, cx.epc.Cfg.ClusterSize)
-	for i := range lines {
-		lines[i] = expect.ExpectedResponse{Value: "Finished defragmenting etcd member"}
-	}
-	return e2e.SpawnWithExpects(cmdArgs, cx.envMap, lines...)
 }
 
 func ctlV3OfflineDefrag(cx ctlCtx) error {

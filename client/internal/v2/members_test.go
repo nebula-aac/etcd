@@ -23,6 +23,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/client/pkg/v3/types"
 )
 
@@ -37,7 +39,7 @@ func TestMembersAPIActionList(t *testing.T) {
 	}
 
 	got := *act.HTTPRequest(ep)
-	err := assertRequest(got, "GET", wantURL, http.Header{}, nil)
+	err := assertRequest(got, http.MethodGet, wantURL, http.Header{}, nil)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -63,7 +65,7 @@ func TestMembersAPIActionAdd(t *testing.T) {
 	wantBody := []byte(`{"peerURLs":["https://127.0.0.1:8081","http://127.0.0.1:8080"]}`)
 
 	got := *act.HTTPRequest(ep)
-	err := assertRequest(got, "POST", wantURL, wantHeader, wantBody)
+	err := assertRequest(got, http.MethodPost, wantURL, wantHeader, wantBody)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -90,7 +92,7 @@ func TestMembersAPIActionUpdate(t *testing.T) {
 	wantBody := []byte(`{"peerURLs":["https://127.0.0.1:8081","http://127.0.0.1:8080"]}`)
 
 	got := *act.HTTPRequest(ep)
-	err := assertRequest(got, "PUT", wantURL, wantHeader, wantBody)
+	err := assertRequest(got, http.MethodPut, wantURL, wantHeader, wantBody)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -107,7 +109,7 @@ func TestMembersAPIActionRemove(t *testing.T) {
 	}
 
 	got := *act.HTTPRequest(ep)
-	err := assertRequest(got, "DELETE", wantURL, http.Header{}, nil)
+	err := assertRequest(got, http.MethodDelete, wantURL, http.Header{}, nil)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -124,7 +126,7 @@ func TestMembersAPIActionLeader(t *testing.T) {
 	}
 
 	got := *act.HTTPRequest(ep)
-	err := assertRequest(got, "GET", wantURL, http.Header{}, nil)
+	err := assertRequest(got, http.MethodGet, wantURL, http.Header{}, nil)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -152,9 +154,7 @@ func TestV2MembersURL(t *testing.T) {
 		Path:   "/pants/v2/members",
 	}
 
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("v2MembersURL got %#v, want %#v", got, want)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "v2MembersURL got %#v, want %#v", got, want)
 }
 
 func TestMemberUnmarshal(t *testing.T) {
@@ -312,13 +312,9 @@ func TestMemberCreateRequestMarshal(t *testing.T) {
 	want := []byte(`{"peerURLs":["http://127.0.0.1:8081","https://127.0.0.1:8080"]}`)
 
 	got, err := json.Marshal(&req)
-	if err != nil {
-		t.Fatalf("Marshal returned unexpected err=%v", err)
-	}
+	require.NoErrorf(t, err, "Marshal returned unexpected err")
 
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("Failed to marshal memberCreateRequest: want=%s, got=%s", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "Failed to marshal memberCreateRequest: want=%s, got=%s", want, got)
 }
 
 func TestHTTPMembersAPIAddSuccess(t *testing.T) {
@@ -371,7 +367,7 @@ func TestHTTPMembersAPIAddError(t *testing.T) {
 		// generic httpClient failure
 		{
 			peerURL: okPeer,
-			client:  &staticHTTPClient{err: errors.New("fail!")},
+			client:  &staticHTTPClient{err: errors.New("fail")},
 		},
 
 		// unrecognized HTTP status code
@@ -456,7 +452,7 @@ func TestHTTPMembersAPIRemoveFail(t *testing.T) {
 	tests := []httpClient{
 		// generic error
 		&staticHTTPClient{
-			err: errors.New("fail!"),
+			err: errors.New("fail"),
 		},
 
 		// unexpected HTTP status code
@@ -509,7 +505,7 @@ func TestHTTPMembersAPIListSuccess(t *testing.T) {
 func TestHTTPMembersAPIListError(t *testing.T) {
 	tests := []httpClient{
 		// generic httpClient failure
-		&staticHTTPClient{err: errors.New("fail!")},
+		&staticHTTPClient{err: errors.New("fail")},
 
 		// unrecognized HTTP status code
 		&staticHTTPClient{
@@ -569,7 +565,7 @@ func TestHTTPMembersAPILeaderSuccess(t *testing.T) {
 func TestHTTPMembersAPILeaderError(t *testing.T) {
 	tests := []httpClient{
 		// generic httpClient failure
-		&staticHTTPClient{err: errors.New("fail!")},
+		&staticHTTPClient{err: errors.New("fail")},
 
 		// unrecognized HTTP status code
 		&staticHTTPClient{

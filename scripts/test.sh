@@ -60,7 +60,8 @@ fi
 PASSES=${PASSES:-"gofmt bom dep build unit"}
 KEEP_GOING_SUITE=${KEEP_GOING_SUITE:-false}
 PKG=${PKG:-}
-SHELLCHECK_VERSION=${SHELLCHECK_VERSION:-"v0.8.0"}
+SHELLCHECK_VERSION=${SHELLCHECK_VERSION:-"v0.10.0"}
+MARKDOWN_MARKER_VERSION=${MARKDOWN_MARKER_VERSION:="v0.10.0"}
 
 if [ -z "${GOARCH:-}" ]; then
   GOARCH=$(go env GOARCH);
@@ -260,6 +261,7 @@ function merge_cov {
   merge_cov_files "${coverdir}" "${coverdir}/all.coverprofile"
 }
 
+# https://docs.codecov.com/docs/unexpected-coverage-changes#reasons-for-indirect-changes
 function cov_pass {
   # shellcheck disable=SC2153
   if [ -z "${COVERDIR:-}" ]; then
@@ -338,94 +340,86 @@ function shellcheck_pass {
 }
 
 function shellws_pass {
-  TAB=$'\t'
   log_callout "Ensuring no tab-based indention in shell scripts"
   local files
-  files=$(find ./ -name '*.sh' -print0 | xargs -0 )
-  # shellcheck disable=SC2206
-  files=( ${files[@]} "./scripts/build-binary.sh" "./scripts/build-docker.sh" "./scripts/release.sh" )
-  log_cmd "grep -E -n $'^ *${TAB}' ${files[*]}"
-  # shellcheck disable=SC2086
-  if grep -E -n $'^ *${TAB}' "${files[@]}" | sed $'s|${TAB}|[\\\\tab]|g'; then
-    log_error "FAIL: found tab-based indention in bash scripts. Use '  ' (double space)."
-    local files_with_tabs
-    files_with_tabs=$(grep -E -l $'^ *\\t' "${files[@]}")
-    log_warning "Try: sed -i 's|\\t|  |g' $files_with_tabs"
-    return 1
-  else
-    log_success "SUCCESS: no tabulators found."
-    return 0
+  if files=$(find . -name '*.sh' -print0 | xargs -0 grep -E -n $'^\s*\t'); then
+    log_error "FAIL: found tab-based indention in the following bash scripts. Use '  ' (double space):"
+    log_error "${files}"
+    log_warning "Suggestion: run \"make fix\" to address the issue."
+    return 255
   fi
-}
-
-function markdown_you_find_eschew_you {
-  local find_you_cmd="find . -name \\*.md ! -path '*/vendor/*' ! -path './Documentation/*' ! -path './gopath.proto/*' ! -path './release/*' -exec grep -E --color '[Yy]ou[r]?[ '\\''.,;]' {} + || true"
-  run eval "${find_you_cmd}"
-}
-
-function markdown_you_pass {
-  # TODO: ./CONTRIBUTING.md:## Get your pull request reviewed
-  generic_checker markdown_you_find_eschew_you
+  log_success "SUCCESS: no tabulators found."
 }
 
 function markdown_marker_pass {
+  local marker="marker"
   # TODO: check other markdown files when marker handles headers with '[]'
-  if tool_exists "marker" "https://crates.io/crates/marker"; then
-    generic_checker run marker --skip-http --root ./Documentation 2>&1
+  if ! tool_exists "$marker" "https://crates.io/crates/marker"; then
+    log_callout "Installing markdown marker $MARKDOWN_MARKER_VERSION"
+    wget -qO- "https://github.com/crawford/marker/releases/download/${MARKDOWN_MARKER_VERSION}/marker-${MARKDOWN_MARKER_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar -xzv -C /tmp/ --strip-components=1 >/dev/null
+    mkdir -p ./bin
+    mv /tmp/marker ./bin/
+    marker=./bin/marker
   fi
+
+  generic_checker run "${marker}" --skip-http --allow-absolute-paths --root "${ETCD_ROOT_DIR}" -e ./CHANGELOG -e ./etcdctl -e etcdutl -e ./tools 2>&1
+}
+
+function govuln_pass {
+  run_for_modules run govulncheck -show verbose
 }
 
 function govet_pass {
   run_for_modules generic_checker run go vet
 }
 
-function govet_shadow_pass {
-  # TODO: we should ignore the generated packages?
+function govet_shadow_per_package {
+  local shadow
+  shadow=$1
+
+  # skip grpc_gateway packages because
   #
   # stderr: etcdserverpb/gw/rpc.pb.gw.go:2100:3: declaration of "ctx" shadows declaration at line 2005
+  local skip_pkgs=(
+    "go.etcd.io/etcd/api/v3/etcdserverpb/gw"
+    "go.etcd.io/etcd/server/v3/etcdserver/api/v3lock/v3lockpb/gw"
+    "go.etcd.io/etcd/server/v3/etcdserver/api/v3election/v3electionpb/gw"
+  )
+
+  local pkgs=()
+  while IFS= read -r line; do
+    local in_skip_pkgs="false"
+
+    for pkg in "${skip_pkgs[@]}"; do
+      if [ "${pkg}" == "${line}" ]; then
+        in_skip_pkgs="true"
+        break
+      fi
+    done
+
+    if [ "${in_skip_pkgs}" == "true" ]; then
+      continue
+    fi
+
+    pkgs+=("${line}")
+  done < <(go list ./...)
+
+  run go vet -all -vettool="${shadow}" "${pkgs[@]}"
+}
+
+function govet_shadow_pass {
   local shadow
   shadow=$(tool_get_bin "golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow")
-  run_for_modules generic_checker run go vet -all -vettool="${shadow}"
+
+  run_for_modules generic_checker govet_shadow_per_package "${shadow}"
 }
 
-function unparam_pass {
-  # TODO: transport/listener.go:129:60: newListenConfig - result 1 (error) is always nil
-  run_for_modules generic_checker run_go_tool "mvdan.cc/unparam"
+function lint_pass {
+  run_for_modules generic_checker run golangci-lint run --config "${ETCD_ROOT_DIR}/tools/.golangci.yaml"
 }
 
-function staticcheck_pass {
-  # TODO: we should upgrade pb or ignore the pb package
-  #
-  # versionpb/version.pb.go:69:15: proto.RegisterFile is deprecated: Use protoregistry.GlobalFiles.RegisterFile instead.  (SA1019)
-  run_for_modules generic_checker run_go_tool "honnef.co/go/tools/cmd/staticcheck"
-}
-
-function revive_pass {
-  # TODO: etcdserverpb/raft_internal_stringer.go:15:1: should have a package comment
-  run_for_modules generic_checker run_go_tool "github.com/mgechev/revive" -config "${ETCD_ROOT_DIR}/tests/revive.toml" -exclude "vendor/..." -exclude "out/..."
-}
-
-function unconvert_pass {
-  # TODO: pb package should be filtered out.
-  run_for_modules generic_checker run_go_tool "github.com/mdempsky/unconvert" unconvert -v
-}
-
-function ineffassign_per_package {
-  # bash 3.x compatible replacement of: mapfile -t gofiles < <(go_srcs_in_module)
-  local gofiles=()
-  while IFS= read -r line; do gofiles+=("$line"); done < <(go_srcs_in_module)
-
-  # TODO: ineffassign should work with package instead of files
-  run_go_tool github.com/gordonklaus/ineffassign "${gofiles[@]}"
-}
-
-function ineffassign_pass {
-  run_for_modules generic_checker ineffassign_per_package
-}
-
-function nakedret_pass {
-  # TODO: nakedret should work with -set_exit_status
-  run_for_modules generic_checker run_go_tool "github.com/alexkohler/nakedret"
+function lint_fix_pass {
+  run_for_modules generic_checker run golangci-lint run --config "${ETCD_ROOT_DIR}/tools/.golangci.yaml" --fix
 }
 
 function license_header_per_module {
@@ -437,29 +431,6 @@ function license_header_per_module {
 
 function license_header_pass {
   run_for_modules generic_checker license_header_per_module
-}
-
-function receiver_name_for_package {
-  # bash 3.x compatible replacement of: mapfile -t gofiles < <(go_srcs_in_module)
-  local gofiles=()
-  while IFS= read -r line; do gofiles+=("$line"); done < <(go_srcs_in_module)
-
-  recvs=$(grep 'func ([^*]' "${gofiles[@]}"  | tr  ':' ' ' |  \
-    awk ' { print $2" "$3" "$4" "$1 }' | sed "s/[a-zA-Z\\.]*go//g" |  sort  | uniq  | \
-    grep -Ev  "(Descriptor|Proto|_)"  | awk ' { print $3" "$4 } ' | sort | uniq -c | grep -v ' 1 ' | awk ' { print $2 } ')
-  if [ -n "${recvs}" ]; then
-    # shellcheck disable=SC2206
-    recvs=($recvs)
-    for recv in "${recvs[@]}"; do
-      log_error "Mismatched receiver for $recv..."
-      grep "$recv" "${gofiles[@]}" | grep 'func ('
-    done
-    return 255
-  fi
-}
-
-function receiver_name_pass {
-  run_for_modules receiver_name_for_package
 }
 
 # goword_for_package package
@@ -506,13 +477,13 @@ function bom_pass {
   log_callout "Checking bill of materials..."
   # https://github.com/golang/go/commit/7c388cc89c76bc7167287fb488afcaf5a4aa12bf
   # shellcheck disable=SC2207
-  modules=($(modules_exp))
+  modules=($(modules_for_bom))
 
   # Internally license-bill-of-materials tends to modify go.sum
   run cp go.sum go.sum.tmp || return 2
   run cp go.mod go.mod.tmp || return 2
 
-  output=$(GOFLAGS=-mod=mod run_go_tool github.com/coreos/license-bill-of-materials \
+  output=$(GOFLAGS=-mod=mod run_go_tool github.com/appscodelabs/license-bill-of-materials \
     --override-file ./bill-of-materials.override.json \
     "${modules[@]}")
   code="$?"
@@ -540,20 +511,27 @@ function dump_deps_of_module() {
   if ! module=$(run go list -m); then
     return 255
   fi
-  run go list -f "{{if not .Indirect}}{{if .Version}}{{.Path}},{{.Version}},${module}{{end}}{{end}}" -m all
+  run go mod edit -json | jq -r '.Require[] | .Path+","+.Version+","+if .Indirect then " (indirect)" else "" end+",'"${module}"'"'
 }
 
 # Checks whether dependencies are consistent across modules
 function dep_pass {
   local all_dependencies
+  local tools_mod_dependencies
   all_dependencies=$(run_for_modules dump_deps_of_module | sort) || return 2
+  # tools/mod is a special case. It is a module that is not included in the
+  # module list from test_lib.sh. However, we need to ensure that the
+  # dependency versions match the rest of the project. Therefore, explicitly
+  # execute the command for tools/mod, and append its dependencies to the list.
+  tools_mod_dependencies=$(run_for_module "tools/mod" dump_deps_of_module "./...") || return 2
+  all_dependencies="${all_dependencies}"$'\n'"${tools_mod_dependencies}"
 
   local duplicates
   duplicates=$(echo "${all_dependencies}" | cut -d ',' -f 1,2 | sort | uniq | cut -d ',' -f 1 | sort | uniq -d) || return 2
 
   for dup in ${duplicates}; do
-    log_error "FAIL: inconsistent versions for depencency: ${dup}"
-    echo "${all_dependencies}" | grep "${dup}" | sed "s|\\([^,]*\\),\\([^,]*\\),\\([^,]*\\)|  - \\1@\\2 from: \\3|g"
+    log_error "FAIL: inconsistent versions for dependency: ${dup}"
+    echo "${all_dependencies}" | grep "${dup}," | sed 's|\([^,]*\),\([^,]*\),\([^,]*\),\([^,]*\)|  - \1@\2\3 from: \4|g'
   done
   if [[ -n "${duplicates}" ]]; then
     log_error "FAIL: inconsistent dependencies"
@@ -618,34 +596,11 @@ function release_pass {
 }
 
 function mod_tidy_for_module {
-  # Watch for upstream solution: https://github.com/golang/go/issues/27005
-  local tmpModDir
-  tmpModDir=$(mktemp -d -t 'tmpModDir.XXXXXX')
-  run cp "./go.mod" "${tmpModDir}" || return 2
-
-  # Guarantees keeping go.sum minimal
-  # If this is causing too much problems, we should
-  # stop controlling go.sum at all.
-  rm go.sum
-  run go mod tidy || return 2
-
-  set +e
-  local tmpFileGoModInSync
-  diff -C 5 "${tmpModDir}/go.mod" "./go.mod"
-  tmpFileGoModInSync="$?"
-
-  # Bring back initial state
-  mv "${tmpModDir}/go.mod" "./go.mod"
-
-  if [ "${tmpFileGoModInSync}" -ne 0 ]; then
-    log_error "${PWD}/go.mod is not in sync with 'go mod tidy'"
-    return 255
-  fi
-  set -e
+  run go mod tidy -diff
 }
 
 function mod_tidy_pass {
-  run_for_modules mod_tidy_for_module
+  run_for_modules generic_checker mod_tidy_for_module
 }
 
 function proto_annotations_pass {
@@ -654,21 +609,6 @@ function proto_annotations_pass {
 
 function genproto_pass {
   "${ETCD_ROOT_DIR}/scripts/verify_genproto.sh"
-}
-
-function goimport_for_module {
-  GOFILES=$(run go list  --f "{{with \$d:=.}}{{range .GoFiles}}{{\$d.Dir}}/{{.}}{{\"\n\"}}{{end}}{{end}}" ./...) || return 2
-  TESTGOFILES=$(run go list  --f "{{with \$d:=.}}{{range .TestGoFiles}}{{\$d.Dir}}/{{.}}{{\"\n\"}}{{end}}{{end}}" ./...) || return 2
-  cd "${ETCD_ROOT_DIR}/tools/mod"
-  FILESNEEDSFIX=$(echo "${GOFILES}" "${TESTGOFILES}" | grep -v '.gw.go' | grep -v '.pb.go' | xargs -n 100 go run golang.org/x/tools/cmd/goimports -l -local go.etcd.io)
-  if [ -n "$FILESNEEDSFIX" ]; then
-    log_error -e "the following files are not sync with 'goimports'. run 'make fix'\\n$FILESNEEDSFIX"
-    return 255
-  fi
-}
-
-function goimport_pass {
-  run_for_modules goimport_for_module
 }
 
 ########### MAIN ###############################################################
@@ -693,7 +633,7 @@ function run_pass {
 log_callout "Starting at: $(date)"
 fail_flag=false
 for pass in $PASSES; do
-  if run_pass "${pass}" "${@}"; then
+  if run_pass "${pass}" "$@"; then
     continue
   else
     fail_flag=true

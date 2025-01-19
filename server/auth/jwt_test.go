@@ -16,7 +16,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -117,9 +119,7 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 	if opts["pub-key"] != "" && opts["priv-key"] != "" {
 		t.Run("verify-only", func(t *testing.T) {
 			newOpts := make(map[string]string, len(opts))
-			for k, v := range opts {
-				newOpts[k] = v
-			}
+			maps.Copy(newOpts, opts)
 			delete(newOpts, "priv-key")
 			verify, err := newTokenProviderJWT(lg, newOpts)
 			if err != nil {
@@ -139,10 +139,9 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 			}
 
 			_, aerr := verify.assign(ctx, "abc", 123)
-			if aerr != ErrVerifyOnly {
+			if !errors.Is(aerr, ErrVerifyOnly) {
 				t.Fatalf("unexpected error when attempting to sign with public key: %v", aerr)
 			}
-
 		})
 	}
 }
@@ -220,8 +219,7 @@ func TestJWTTokenWithMissingFields(t *testing.T) {
 }
 
 func TestJWTBad(t *testing.T) {
-
-	var badCases = map[string]map[string]string{
+	badCases := map[string]map[string]string{
 		"no options": {},
 		"invalid method": {
 			"sign-method": "invalid",

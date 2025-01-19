@@ -20,10 +20,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.uber.org/zap/zaptest"
 )
 
 var (
@@ -41,9 +42,9 @@ func TestBackendPreCommitHook(t *testing.T) {
 	// Empty commit.
 	tx.Commit()
 
-	assert.Equal(t, ">cc", getCommitsKey(t, be), "expected 2 explict commits")
+	assert.Equalf(t, ">cc", getCommitsKey(t, be), "expected 2 explicit commits")
 	tx.Commit()
-	assert.Equal(t, ">ccc", getCommitsKey(t, be), "expected 3 explict commits")
+	assert.Equalf(t, ">ccc", getCommitsKey(t, be), "expected 3 explicit commits")
 }
 
 func TestBackendAutoCommitLimitHook(t *testing.T) {

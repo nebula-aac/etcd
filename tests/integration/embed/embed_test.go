@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -38,14 +40,12 @@ import (
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
-var (
-	testTLSInfo = transport.TLSInfo{
-		KeyFile:        testutils.MustAbsPath("../../fixtures/server.key.insecure"),
-		CertFile:       testutils.MustAbsPath("../../fixtures/server.crt"),
-		TrustedCAFile:  testutils.MustAbsPath("../../fixtures/ca.crt"),
-		ClientCertAuth: true,
-	}
-)
+var testTLSInfo = transport.TLSInfo{
+	KeyFile:        testutils.MustAbsPath("../../fixtures/server.key.insecure"),
+	CertFile:       testutils.MustAbsPath("../../fixtures/server.crt"),
+	TrustedCAFile:  testutils.MustAbsPath("../../fixtures/ca.crt"),
+	ClientCertAuth: true,
+}
 
 func TestEmbedEtcd(t *testing.T) {
 	testutil.SkipTestIfShortMode(t, "Cannot start embedded cluster in --short tests")
@@ -147,9 +147,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 	cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
 
 	e, err := embed.StartEtcd(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	<-e.Server.ReadyNotify() // wait for e.Server to join the cluster
 
 	clientCfg := clientv3.Config{
@@ -157,14 +155,10 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 	}
 	if secure {
 		clientCfg.TLS, err = testTLSInfo.ClientConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	}
 	cli, err := integration2.NewClient(t, clientCfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer cli.Close()
 
 	// open watch connection
@@ -181,9 +175,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 		t.Fatalf("took too long to close server")
 	}
 	err = <-e.Err()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 }
 
 func newEmbedURLs(secure bool, n int) (urls []url.URL) {
@@ -221,9 +213,51 @@ func TestEmbedEtcdAutoCompactionRetentionRetained(t *testing.T) {
 	cfg.AutoCompactionRetention = "2"
 
 	e, err := embed.StartEtcd(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	autoCompactionRetention := e.Server.Cfg.AutoCompactionRetention
-	duration_to_compare, _ := time.ParseDuration("2h0m0s")
-	assert.Equal(t, duration_to_compare, autoCompactionRetention)
+	durationToCompare, _ := time.ParseDuration("2h0m0s")
+	assert.Equal(t, durationToCompare, autoCompactionRetention)
 	e.Close()
+}
+
+func TestEmbedEtcdStopDuringBootstrapping(t *testing.T) {
+	integration2.BeforeTest(t, integration2.WithFailpoint("beforePublishing", `sleep("2s")`))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		cfg := embed.NewConfig()
+		urls := newEmbedURLs(false, 2)
+		setupEmbedCfg(cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
+		cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
+
+		e, err := embed.StartEtcd(cfg)
+		if err != nil {
+			t.Errorf("Failed to start etcd, got error %v", err)
+		}
+		defer e.Close()
+
+		go func() {
+			time.Sleep(time.Second)
+			e.Server.Stop()
+			t.Log("Stopped server during bootstrapping")
+		}()
+
+		select {
+		case <-e.Server.ReadyNotify():
+			t.Log("Server is ready!")
+		case <-e.Server.StopNotify():
+			t.Log("Server is stopped")
+		case <-time.After(20 * time.Second):
+			e.Server.Stop() // trigger a shutdown
+			t.Error("Server took too long to start!")
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("timeout in bootstrapping etcd")
+	}
 }

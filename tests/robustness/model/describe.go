@@ -25,8 +25,14 @@ func describeEtcdResponse(request EtcdRequest, response MaybeEtcdResponse) strin
 	if response.Error != "" {
 		return fmt.Sprintf("err: %q", response.Error)
 	}
-	if response.PartialResponse {
-		return fmt.Sprintf("unknown, rev: %d", response.Revision)
+	if response.ClientError != "" {
+		return fmt.Sprintf("err: %q", response.ClientError)
+	}
+	if response.Persisted {
+		if response.PersistedRevision != 0 {
+			return fmt.Sprintf("unknown, rev: %d", response.PersistedRevision)
+		}
+		return "unknown"
 	}
 	switch request.Type {
 	case Range:
@@ -38,6 +44,8 @@ func describeEtcdResponse(request EtcdRequest, response MaybeEtcdResponse) strin
 			return "ok"
 		}
 		return fmt.Sprintf("ok, rev: %d", response.Revision)
+	case Compact:
+		return "ok"
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}
@@ -48,6 +56,10 @@ func describeEtcdRequest(request EtcdRequest) string {
 	case Range:
 		return describeRangeRequest(request.Range.RangeOptions, request.Range.Revision)
 	case Txn:
+		guaranteedTxnDescription := describeGuaranteedTxn(request.Txn)
+		if guaranteedTxnDescription != "" {
+			return guaranteedTxnDescription
+		}
 		onSuccess := describeEtcdOperations(request.Txn.OperationsOnSuccess)
 		if len(request.Txn.Conditions) != 0 {
 			if len(request.Txn.OperationsOnFailure) == 0 {
@@ -62,10 +74,34 @@ func describeEtcdRequest(request EtcdRequest) string {
 	case LeaseRevoke:
 		return fmt.Sprintf("leaseRevoke(%d)", request.LeaseRevoke.LeaseID)
 	case Defragment:
-		return fmt.Sprintf("defragment()")
+		return "defragment()"
+	case Compact:
+		return fmt.Sprintf("compact(%d)", request.Compact.Revision)
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}
+}
+
+func describeGuaranteedTxn(txn *TxnRequest) string {
+	if len(txn.Conditions) != 1 || len(txn.OperationsOnSuccess) != 1 || len(txn.OperationsOnFailure) > 1 {
+		return ""
+	}
+	switch txn.OperationsOnSuccess[0].Type {
+	case PutOperation:
+		if txn.Conditions[0].Key != txn.OperationsOnSuccess[0].Put.Key || (len(txn.OperationsOnFailure) == 1 && txn.Conditions[0].Key != txn.OperationsOnFailure[0].Range.Start) {
+			return ""
+		}
+		if txn.Conditions[0].ExpectedRevision == 0 {
+			return fmt.Sprintf("guaranteedCreate(%q, %s)", txn.Conditions[0].Key, describeValueOrHash(txn.OperationsOnSuccess[0].Put.Value))
+		}
+		return fmt.Sprintf("guaranteedUpdate(%q, %s, mod_rev=%d)", txn.Conditions[0].Key, describeValueOrHash(txn.OperationsOnSuccess[0].Put.Value), txn.Conditions[0].ExpectedRevision)
+	case DeleteOperation:
+		if txn.Conditions[0].Key != txn.OperationsOnSuccess[0].Delete.Key || (len(txn.OperationsOnFailure) == 1 && txn.Conditions[0].Key != txn.OperationsOnFailure[0].Range.Start) {
+			return ""
+		}
+		return fmt.Sprintf("guaranteedDelete(%q, mod_rev=%d)", txn.Conditions[0].Key, txn.Conditions[0].ExpectedRevision)
+	}
+	return ""
 }
 
 func describeEtcdConditions(conds []EtcdCondition) string {
@@ -99,9 +135,8 @@ func describeTxnResponse(request *TxnRequest, response *TxnResponse) string {
 	}
 	if response.Failure {
 		return fmt.Sprintf("failure(%s)", description)
-	} else {
-		return fmt.Sprintf("success(%s)", description)
 	}
+	return fmt.Sprintf("success(%s)", description)
 }
 
 func describeEtcdOperation(op EtcdOperation) string {
@@ -147,7 +182,7 @@ func describeEtcdOperationResponse(op EtcdOperation, resp EtcdOperationResult) s
 	case RangeOperation:
 		return describeRangeResponse(op.Range, resp.RangeResponse)
 	case PutOperation:
-		return fmt.Sprintf("ok")
+		return "ok"
 	case DeleteOperation:
 		return fmt.Sprintf("deleted: %d", resp.Deleted)
 	default:
@@ -162,13 +197,12 @@ func describeRangeResponse(request RangeOptions, response RangeResponse) string 
 			kvs[i] = describeValueOrHash(kv.Value)
 		}
 		return fmt.Sprintf("[%s], count: %d", strings.Join(kvs, ","), response.Count)
-	} else {
-		if len(response.KVs) == 0 {
-			return "nil"
-		} else {
-			return describeValueOrHash(response.KVs[0].Value)
-		}
 	}
+
+	if len(response.KVs) == 0 {
+		return "nil"
+	}
+	return describeValueOrHash(response.KVs[0].Value)
 }
 
 func describeValueOrHash(value ValueOrHash) string {

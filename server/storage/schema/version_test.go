@@ -23,7 +23,6 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/bbolt"
-
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 )
@@ -115,7 +114,7 @@ func TestVersionSnapshot(t *testing.T) {
 			tx.Unlock()
 			be.ForceCommit()
 			be.Close()
-			db, err := bbolt.Open(tmpPath, 0400, &bbolt.Options{ReadOnly: true})
+			db, err := bbolt.Open(tmpPath, 0o400, &bbolt.Options{ReadOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,7 +129,6 @@ func TestVersionSnapshot(t *testing.T) {
 			}
 
 			assert.Equal(t, tc.expectVersion, ver.String())
-
 		})
 	}
 }

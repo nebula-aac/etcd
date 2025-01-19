@@ -16,7 +16,6 @@ package testutils
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -36,9 +35,9 @@ func TestLogObserver_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.TODO(), 100*time.Millisecond)
 	_, err := logOb.Expect(ctx, "unknown", 1)
 	cancel()
-	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 
-	assert.Equal(t, 1, len(logOb.entries))
+	assert.Len(t, logOb.entries, 1)
 }
 
 func TestLogObserver_Expect(t *testing.T) {
@@ -54,7 +53,7 @@ func TestLogObserver_Expect(t *testing.T) {
 		defer close(resCh)
 
 		res, err := logOb.Expect(ctx, t.Name(), 2)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		resCh <- res
 	}()
 
@@ -65,7 +64,7 @@ func TestLogObserver_Expect(t *testing.T) {
 	}
 
 	res := <-resCh
-	assert.Equal(t, 2, len(res))
+	assert.Len(t, res, 2)
 
 	// The logged message should be like
 	//
@@ -79,5 +78,5 @@ func TestLogObserver_Expect(t *testing.T) {
 		assert.True(t, strings.HasSuffix(res[idx], expected))
 	}
 
-	assert.Equal(t, 2, len(logOb.entries))
+	assert.Len(t, logOb.entries, 2)
 }

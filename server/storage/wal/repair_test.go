@@ -15,15 +15,18 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
 	"go.etcd.io/raft/v3/raftpb"
 )
@@ -75,7 +78,15 @@ func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expect
 	require.NoError(t, w.Close())
 
 	// repair the wal
-	require.True(t, Repair(lg, p), "'Repair' returned 'false', want 'true'")
+	require.True(t, Repair(lg, p))
+
+	// verify the broken wal has correct permissions
+	bf := filepath.Join(p, filepath.Base(w.tail().Name())+".broken")
+	fi, err := os.Stat(bf)
+	require.NoError(t, err)
+	expectedPerms := fmt.Sprintf("%o", os.FileMode(fileutil.PrivateFileMode))
+	actualPerms := fmt.Sprintf("%o", fi.Mode().Perm())
+	require.Equalf(t, expectedPerms, actualPerms, "unexpected file permissions on .broken wal")
 
 	// read it back
 	w, err = Open(lg, p, walpb.Snapshot{})
@@ -192,7 +203,7 @@ func TestRepairFailDeleteDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, _, err = w.ReadAll()
-	if err != io.ErrUnexpectedEOF {
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want error %v", err, io.ErrUnexpectedEOF)
 	}
 	w.Close()

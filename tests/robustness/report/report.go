@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
@@ -42,31 +44,29 @@ func testResultsDirectory(t *testing.T) string {
 	if err != nil {
 		panic(err)
 	}
-	path, err := filepath.Abs(filepath.Join(resultsDirectory, strings.ReplaceAll(t.Name(), "/", "_")))
-	if err != nil {
-		t.Fatal(err)
-	}
+	path, err := filepath.Abs(filepath.Join(
+		resultsDirectory, strings.ReplaceAll(t.Name(), "/", "_"), fmt.Sprintf("%v", time.Now().UnixNano())))
+	require.NoError(t, err)
 	err = os.RemoveAll(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = os.MkdirAll(path, 0700)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	err = os.MkdirAll(path, 0o700)
+	require.NoError(t, err)
 	return path
 }
 
 func (r *TestReport) Report(t *testing.T, force bool) {
+	_, persistResultsEnvSet := os.LookupEnv("PERSIST_RESULTS")
+	if !t.Failed() && !force && !persistResultsEnvSet {
+		return
+	}
 	path := testResultsDirectory(t)
-	if t.Failed() || force {
-		for _, member := range r.Cluster.Procs {
-			memberDataDir := filepath.Join(path, fmt.Sprintf("server-%s", member.Config().Name))
-			persistMemberDataDir(t, r.Logger, member, memberDataDir)
-		}
-		if r.Client != nil {
-			persistClientReports(t, r.Logger, path, r.Client)
-		}
+	r.Logger.Info("Saving robustness test report", zap.String("path", path))
+	for _, member := range r.Cluster.Procs {
+		memberDataDir := filepath.Join(path, fmt.Sprintf("server-%s", member.Config().Name))
+		persistMemberDataDir(t, r.Logger, member, memberDataDir)
+	}
+	if r.Client != nil {
+		persistClientReports(t, r.Logger, path, r.Client)
 	}
 	if r.Visualize != nil {
 		err := r.Visualize(filepath.Join(path, "history.html"))
@@ -78,8 +78,14 @@ func (r *TestReport) Report(t *testing.T, force bool) {
 
 func persistMemberDataDir(t *testing.T, lg *zap.Logger, member e2e.EtcdProcess, path string) {
 	lg.Info("Saving member data dir", zap.String("member", member.Config().Name), zap.String("path", path))
-	err := os.Rename(member.Config().DataDirPath, path)
-	if err != nil {
-		t.Fatal(err)
+	err := os.Rename(memberDataDir(member), path)
+	require.NoError(t, err)
+}
+
+func memberDataDir(member e2e.EtcdProcess) string {
+	lazyFS := member.LazyFS()
+	if lazyFS != nil {
+		return filepath.Join(lazyFS.LazyFSDir, "data")
 	}
+	return member.Config().DataDirPath
 }

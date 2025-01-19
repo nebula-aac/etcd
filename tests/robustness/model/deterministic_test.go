@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
@@ -35,9 +36,7 @@ func TestModelDeterministic(t *testing.T) {
 					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, DeterministicModel.DescribeOperation(op.req, op.resp.EtcdResponse))
 					var loadedState EtcdState
 					err := json.Unmarshal([]byte(state.(string)), &loadedState)
-					if err != nil {
-						t.Fatalf("Failed to load state: %v", err)
-					}
+					require.NoErrorf(t, err, "Failed to load state")
 					_, resp := loadedState.Step(op.req)
 					t.Errorf("Response diff: %s", cmp.Diff(op.resp, resp))
 					break
@@ -162,11 +161,11 @@ var commonTestScenarios = []modelTestCase{
 	{
 		name: "Stale Get need to match put if asking about matching revision",
 		operations: []testOperation{
-			{req: putRequest("key", "1"), resp: putResponse(2)},
-			{req: staleGetRequest("key", 2), resp: getResponse("key", "1", 3, 2), expectFailure: true},
-			{req: staleGetRequest("key", 2), resp: getResponse("key", "1", 2, 3), expectFailure: true},
-			{req: staleGetRequest("key", 2), resp: getResponse("key", "2", 2, 2), expectFailure: true},
-			{req: staleGetRequest("key", 2), resp: getResponse("key", "1", 2, 2)},
+			{req: putRequest("key1", "1"), resp: putResponse(2)},
+			{req: staleGetRequest("key1", 2), resp: getResponse("key1", "1", 3, 2), expectFailure: true},
+			{req: staleGetRequest("key1", 2), resp: getResponse("key1", "1", 2, 3), expectFailure: true},
+			{req: staleGetRequest("key1", 2), resp: getResponse("key1", "2", 2, 2), expectFailure: true},
+			{req: staleGetRequest("key1", 2), resp: getResponse("key1", "1", 2, 2)},
 		},
 	},
 	{

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -26,18 +27,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc"
+
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/lease"
+	"go.etcd.io/etcd/server/v3/storage"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/mvcc/testutil"
 	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
-	"google.golang.org/grpc"
 )
 
 func TestMaintenanceHashKV(t *testing.T) {
@@ -47,19 +50,17 @@ func TestMaintenanceHashKV(t *testing.T) {
 	defer clus.Terminate(t)
 
 	for i := 0; i < 3; i++ {
-		if _, err := clus.RandClient().Put(context.Background(), "foo", "bar"); err != nil {
-			t.Fatal(err)
-		}
+		_, err := clus.RandClient().Put(context.Background(), "foo", "bar")
+		require.NoError(t, err)
 	}
 
 	var hv uint32
 	for i := 0; i < 3; i++ {
 		cli := clus.Client(i)
 		// ensure writes are replicated
-		if _, err := cli.Get(context.TODO(), "foo"); err != nil {
-			t.Fatal(err)
-		}
-		hresp, err := cli.HashKV(context.Background(), clus.Members[i].GRPCURL(), 0)
+		_, err := cli.Get(context.TODO(), "foo")
+		require.NoError(t, err)
+		hresp, err := cli.HashKV(context.Background(), clus.Members[i].GRPCURL, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +87,7 @@ func TestCompactionHash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testutil.TestCompactionHash(context.Background(), t, hashTestCase{cc, clus.Members[0].GRPCURL()}, 1000)
+	testutil.TestCompactionHash(context.Background(), t, hashTestCase{cc, clus.Members[0].GRPCURL}, 1000)
 }
 
 type hashTestCase struct {
@@ -133,7 +134,7 @@ func TestMaintenanceMoveLeader(t *testing.T) {
 
 	cli := clus.Client(targetIdx)
 	_, err := cli.MoveLeader(context.Background(), target)
-	if err != rpctypes.ErrNotLeader {
+	if !errors.Is(err, rpctypes.ErrNotLeader) {
 		t.Fatalf("error expected %v, got %v", rpctypes.ErrNotLeader, err)
 	}
 
@@ -176,9 +177,15 @@ func TestMaintenanceSnapshotCancel(t *testing.T) {
 	}
 	defer rc1.Close()
 
+	// read 16 bytes to ensure that server opens snapshot
+	buf := make([]byte, 16)
+	n, err := rc1.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, 16, n)
+
 	cancel()
 	_, err = io.Copy(io.Discard, rc1)
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected %v, got %v", context.Canceled, err)
 	}
 }
@@ -295,7 +302,7 @@ func testMaintenanceSnapshotErrorInflight(t *testing.T, snapshot func(context.Co
 		close(donec)
 	}()
 	_, err = io.Copy(io.Discard, rc1)
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Errorf("expected %v, got %v", context.Canceled, err)
 	}
 	<-donec
@@ -369,7 +376,7 @@ func TestMaintenanceSnapshotContentDigest(t *testing.T) {
 
 	checksumInBytes, err := io.ReadAll(snapFile)
 	require.NoError(t, err)
-	require.Equal(t, int(checksumSize), len(checksumInBytes))
+	require.Len(t, checksumInBytes, int(checksumSize))
 
 	// remove the checksum part and rehash
 	err = snapFile.Truncate(snapSize - checksumSize)
@@ -390,7 +397,7 @@ func TestMaintenanceSnapshotContentDigest(t *testing.T) {
 func TestMaintenanceStatus(t *testing.T) {
 	integration2.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, QuotaBackendBytes: storage.DefaultQuotaBytes})
 	defer clus.Terminate(t)
 
 	t.Logf("Waiting for leader...")
@@ -399,7 +406,7 @@ func TestMaintenanceStatus(t *testing.T) {
 
 	eps := make([]string, 3)
 	for i := 0; i < 3; i++ {
-		eps[i] = clus.Members[i].GRPCURL()
+		eps[i] = clus.Members[i].GRPCURL
 	}
 
 	t.Logf("Creating client...")
@@ -417,6 +424,9 @@ func TestMaintenanceStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("Response from %v: %v", i, resp)
+		if resp.DbSizeQuota != storage.DefaultQuotaBytes {
+			t.Errorf("unexpected backend default quota returned: %d, expected %d", resp.DbSizeQuota, storage.DefaultQuotaBytes)
+		}
 		if prevID == 0 {
 			prevID, leaderFound = resp.Header.MemberId, resp.Header.MemberId == resp.Leader
 			continue

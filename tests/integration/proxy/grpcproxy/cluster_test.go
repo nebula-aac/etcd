@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc"
@@ -40,7 +41,7 @@ func TestClusterProxyMemberList(t *testing.T) {
 	defer clus.Terminate(t)
 
 	lg := zaptest.NewLogger(t)
-	serverEps := []string{clus.Members[0].GRPCURL()}
+	serverEps := []string{clus.Members[0].GRPCURL}
 	prefix := "test-prefix"
 	hostname, _ := os.Hostname()
 	cts := newClusterProxyServer(lg, serverEps, prefix, t)
@@ -73,13 +74,13 @@ func TestClusterProxyMemberList(t *testing.T) {
 	}
 	assert.Contains(t, mresp.Members, &pb.Member{Name: hostname, ClientURLs: []string{cts.caddr}})
 
-	//test proxy member add
+	// test proxy member add
 	newMemberAddr := "127.0.0.2:6789"
 	grpcproxy.Register(lg, cts.c, prefix, newMemberAddr, 7)
 	// wait some time for proxy update members
 	time.Sleep(200 * time.Millisecond)
 
-	//check add member succ
+	// check add member succ
 	mresp, err = client.Cluster.MemberList(context.Background())
 	if err != nil {
 		t.Fatalf("err %v, want nil", err)
@@ -89,12 +90,12 @@ func TestClusterProxyMemberList(t *testing.T) {
 	}
 	assert.Contains(t, mresp.Members, &pb.Member{Name: hostname, ClientURLs: []string{newMemberAddr}})
 
-	//test proxy member delete
+	// test proxy member delete
 	deregisterMember(cts.c, prefix, newMemberAddr, t)
 	// wait some time for proxy update members
 	time.Sleep(200 * time.Millisecond)
 
-	//check delete member succ
+	// check delete member succ
 	mresp, err = client.Cluster.MemberList(context.Background())
 	if err != nil {
 		t.Fatalf("err %v, want nil", err)
@@ -132,17 +133,13 @@ func newClusterProxyServer(lg *zap.Logger, endpoints []string, prefix string, t 
 		DialTimeout: 5 * time.Second,
 	}
 	client, err := integration2.NewClient(t, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	cts := &clusterproxyTestServer{
 		c: client,
 	}
 	cts.l, err = net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	var opts []grpc.ServerOption
 	cts.server = grpc.NewServer(opts...)
 	servec := make(chan struct{})

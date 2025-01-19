@@ -16,6 +16,7 @@ package membership
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
@@ -276,8 +277,10 @@ func TestClusterValidateAndAssignIDs(t *testing.T) {
 	}
 }
 
-func TestClusterValidateConfigurationChange(t *testing.T) {
+func TestClusterValidateConfigurationChangeV2(t *testing.T) {
 	cl := NewCluster(zaptest.NewLogger(t), WithMaxLearners(1))
+	be := newMembershipBackend()
+	cl.SetBackend(be)
 	cl.SetStore(v2store.New())
 	for i := 1; i <= 4; i++ {
 		var isLearner bool
@@ -456,7 +459,7 @@ func TestClusterValidateConfigurationChange(t *testing.T) {
 	}
 	for i, tt := range tests {
 		err := cl.ValidateConfigurationChange(tt.cc)
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: validateConfigurationChange error = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -467,6 +470,9 @@ func TestClusterGenID(t *testing.T) {
 		newTestMember(1, nil, "", nil),
 		newTestMember(2, nil, "", nil),
 	})
+
+	be := newMembershipBackend()
+	cs.SetBackend(be)
 
 	cs.genID()
 	if cs.ID() == 0 {
@@ -523,7 +529,7 @@ func TestClusterAddMember(t *testing.T) {
 	wactions := []testutil.Action{
 		{
 			Name: "Create",
-			Params: []interface{}{
+			Params: []any{
 				path.Join(StoreMembersPrefix, "1", "raftAttributes"),
 				false,
 				`{"peerURLs":null}`,
@@ -541,15 +547,15 @@ func TestClusterAddMemberAsLearner(t *testing.T) {
 	st := mockstore.NewRecorder()
 	c := newTestCluster(t, nil)
 	c.SetStore(st)
-	c.AddMember(newTestMemberAsLearner(1, nil, "node1", nil), true)
+	c.AddMember(newTestMemberAsLearner(1, []string{}, "node1", []string{"http://node1"}), true)
 
 	wactions := []testutil.Action{
 		{
 			Name: "Create",
-			Params: []interface{}{
+			Params: []any{
 				path.Join(StoreMembersPrefix, "1", "raftAttributes"),
 				false,
-				`{"peerURLs":null,"isLearner":true}`,
+				`{"peerURLs":[],"isLearner":true}`,
 				false,
 				v2store.TTLOptionSet{ExpireTime: v2store.Permanent},
 			},
@@ -587,8 +593,8 @@ func TestClusterRemoveMember(t *testing.T) {
 	c.RemoveMember(1, true)
 
 	wactions := []testutil.Action{
-		{Name: "Delete", Params: []interface{}{MemberStoreKey(1), true, true}},
-		{Name: "Create", Params: []interface{}{RemovedMemberStoreKey(1), false, "", false, v2store.TTLOptionSet{ExpireTime: v2store.Permanent}}},
+		{Name: "Delete", Params: []any{MemberStoreKey(1), true, true}},
+		{Name: "Create", Params: []any{RemovedMemberStoreKey(1), false, "", false, v2store.TTLOptionSet{ExpireTime: v2store.Permanent}}},
 	}
 	if !reflect.DeepEqual(st.Action(), wactions) {
 		t.Errorf("actions = %v, want %v", st.Action(), wactions)

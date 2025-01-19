@@ -17,10 +17,12 @@ package embed
 import (
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,27 +30,28 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/logutil"
-	"go.etcd.io/etcd/client/pkg/v3/srv"
-	"go.etcd.io/etcd/client/pkg/v3/tlsutil"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/client/pkg/v3/types"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/flags"
-	"go.etcd.io/etcd/pkg/v3/netutil"
-	"go.etcd.io/etcd/server/v3/config"
-	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3compactor"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
-
-	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 	"sigs.k8s.io/yaml"
 
 	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.etcd.io/etcd/client/pkg/v3/srv"
+	"go.etcd.io/etcd/client/pkg/v3/tlsutil"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/featuregate"
+	"go.etcd.io/etcd/pkg/v3/flags"
+	"go.etcd.io/etcd/pkg/v3/netutil"
+	"go.etcd.io/etcd/server/v3/config"
+	"go.etcd.io/etcd/server/v3/etcdserver"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3compactor"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 const (
@@ -67,8 +70,9 @@ const (
 	DefaultGRPCKeepAliveInterval       = 2 * time.Hour
 	DefaultGRPCKeepAliveTimeout        = 20 * time.Second
 	DefaultDowngradeCheckTime          = 5 * time.Second
-	DefaultWaitClusterReadyTimeout     = 5 * time.Second
 	DefaultAutoCompactionMode          = "periodic"
+	DefaultAuthToken                   = "simple"
+	DefaultCompactHashCheckTime        = time.Minute
 
 	DefaultDiscoveryDialTimeout      = 2 * time.Second
 	DefaultDiscoveryRequestTimeOut   = 5 * time.Second
@@ -106,6 +110,8 @@ const (
 	maxElectionMs = 50000
 	// backend freelist map type
 	freelistArrayType = "array"
+
+	ServerFeatureGateFlagName = "feature-gates"
 )
 
 var (
@@ -122,6 +128,15 @@ var (
 
 	// indirection for testing
 	getCluster = srv.GetCluster
+
+	// in 3.6, we are migration all the --experimental flags to feature gate and flags without the prefix.
+	// This is the mapping from the non boolean `experimental-` to the new flags.
+	// TODO: delete in v3.7
+	experimentalNonBoolFlagMigrationMap = map[string]string{
+		"experimental-compact-hash-check-time": "compact-hash-check-time",
+		"experimental-corrupt-check-time":      "corrupt-check-time",
+		"experimental-compaction-batch-limit":  "compaction-batch-limit",
+	}
 )
 
 var (
@@ -147,10 +162,13 @@ func init() {
 
 // Config holds the arguments for configuring an etcd server.
 type Config struct {
-	Name   string `json:"name"`
-	Dir    string `json:"data-dir"`
+	Name string `json:"name"`
+	Dir  string `json:"data-dir"`
+	//revive:disable-next-line:var-naming
 	WalDir string `json:"wal-dir"`
 
+	// SnapshotCount is deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: remove it in 3.7.
 	SnapshotCount uint64 `json:"snapshot-count"`
 
 	// SnapshotCatchUpEntries is the number of entries for a slow follower
@@ -160,8 +178,11 @@ type Config struct {
 	// follower to catch up.
 	SnapshotCatchUpEntries uint64 `json:"experimental-snapshot-catch-up-entries"`
 
+	// MaxSnapFiles is deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: remove it in 3.7.
 	MaxSnapFiles uint `json:"max-snapshots"`
-	MaxWalFiles  uint `json:"max-wals"`
+	//revive:disable-next-line:var-naming
+	MaxWalFiles uint `json:"max-wals"`
 
 	// TickMs is the number of milliseconds between heartbeat ticks.
 	// TODO: decouple tickMs and heartbeat tick (current heartbeat tick = 1).
@@ -212,12 +233,21 @@ type Config struct {
 	// streams that each client can open at a time.
 	MaxConcurrentStreams uint32 `json:"max-concurrent-streams"`
 
+	//revive:disable:var-naming
 	ListenPeerUrls, ListenClientUrls, ListenClientHttpUrls []url.URL
 	AdvertisePeerUrls, AdvertiseClientUrls                 []url.URL
-	ClientTLSInfo                                          transport.TLSInfo
-	ClientAutoTLS                                          bool
-	PeerTLSInfo                                            transport.TLSInfo
-	PeerAutoTLS                                            bool
+	//revive:enable:var-naming
+
+	ClientTLSInfo transport.TLSInfo
+	ClientAutoTLS bool
+	PeerTLSInfo   transport.TLSInfo
+	PeerAutoTLS   bool
+
+	// ExperimentalSetMemberLocalAddr enables using the first specified and
+	// non-loopback local address from initial-advertise-peer-urls as the local
+	// address when communicating with a peer.
+	ExperimentalSetMemberLocalAddr bool `json:"experimental-set-member-localaddr"`
+
 	// SelfSignedCertValidity specifies the validity period of the client and peer certificates
 	// that are automatically generated by etcd when you specify ClientAutoTLS and PeerAutoTLS,
 	// the unit is year, and the default is 1
@@ -229,8 +259,11 @@ type Config struct {
 	CipherSuites []string `json:"cipher-suites"`
 
 	// TlsMinVersion is the minimum accepted TLS version between client/server and peers.
+	//revive:disable-next-line:var-naming
 	TlsMinVersion string `json:"tls-min-version"`
+
 	// TlsMaxVersion is the maximum accepted TLS version between client/server and peers.
+	//revive:disable-next-line:var-naming
 	TlsMaxVersion string `json:"tls-max-version"`
 
 	ClusterState          string `json:"initial-cluster-state"`
@@ -241,10 +274,9 @@ type Config struct {
 	Durl         string                      `json:"discovery"`
 	DiscoveryCfg v3discovery.DiscoveryConfig `json:"discovery-config"`
 
-	InitialCluster                      string        `json:"initial-cluster"`
-	InitialClusterToken                 string        `json:"initial-cluster-token"`
-	StrictReconfigCheck                 bool          `json:"strict-reconfig-check"`
-	ExperimentalWaitClusterReadyTimeout time.Duration `json:"wait-cluster-ready-timeout"`
+	InitialCluster      string `json:"initial-cluster"`
+	InitialClusterToken string `json:"initial-cluster-token"`
+	StrictReconfigCheck bool   `json:"strict-reconfig-check"`
 
 	// AutoCompactionMode is either 'periodic' or 'revision'.
 	AutoCompactionMode string `json:"auto-compaction-mode"`
@@ -268,6 +300,13 @@ type Config struct {
 	// GRPCKeepAliveTimeout is the additional duration of wait
 	// before closing a non-responsive connection. 0 to disable.
 	GRPCKeepAliveTimeout time.Duration `json:"grpc-keepalive-timeout"`
+
+	// GRPCAdditionalServerOptions is the additional server option hook
+	// for changing the default internal gRPC configuration. Note these
+	// additional configurations take precedence over the existing individual
+	// configurations if present. Please refer to
+	// https://github.com/etcd-io/etcd/pull/14066#issuecomment-1248682996
+	GRPCAdditionalServerOptions []grpc.ServerOption `json:"grpc-additional-server-options"`
 
 	// SocketOpts are socket options passed to listener config.
 	SocketOpts transport.SocketOpts `json:"socket-options"`
@@ -313,7 +352,7 @@ type Config struct {
 	UserHandlers map[string]http.Handler `json:"-"`
 	// ServiceRegister is for registering users' gRPC services. A simple usage example:
 	//	cfg := embed.NewConfig()
-	//	cfg.ServerRegister = func(s *grpc.Server) {
+	//	cfg.ServiceRegister = func(s *grpc.Server) {
 	//		pb.RegisterFooServer(s, &fooServer{})
 	//		pb.RegisterBarServer(s, &barServer{})
 	//	}
@@ -326,10 +365,21 @@ type Config struct {
 	// AuthTokenTTL in seconds of the simple token
 	AuthTokenTTL uint `json:"auth-token-ttl"`
 
-	ExperimentalInitialCorruptCheck     bool          `json:"experimental-initial-corrupt-check"`
-	ExperimentalCorruptCheckTime        time.Duration `json:"experimental-corrupt-check-time"`
-	ExperimentalCompactHashCheckEnabled bool          `json:"experimental-compact-hash-check-enabled"`
-	ExperimentalCompactHashCheckTime    time.Duration `json:"experimental-compact-hash-check-time"`
+	ExperimentalInitialCorruptCheck bool `json:"experimental-initial-corrupt-check"`
+	// ExperimentalCorruptCheckTime is the duration of time between cluster corruption check passes.
+	// Deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: delete in v3.7
+	ExperimentalCorruptCheckTime time.Duration `json:"experimental-corrupt-check-time"`
+	CorruptCheckTime             time.Duration `json:"corrupt-check-time"`
+	// ExperimentalCompactHashCheckEnabled enables leader to periodically check followers compaction hashes.
+	// Deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: delete in v3.7
+	ExperimentalCompactHashCheckEnabled bool `json:"experimental-compact-hash-check-enabled"`
+	// ExperimentalCompactHashCheckTime is the duration of time between leader checks followers compaction hashes.
+	// Deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: delete in v3.7
+	ExperimentalCompactHashCheckTime time.Duration `json:"experimental-compact-hash-check-time"`
+	CompactHashCheckTime             time.Duration `json:"compact-hash-check-time"`
 
 	// ExperimentalEnableLeaseCheckpoint enables leader to send regular checkpoints to other members to prevent reset of remaining TTL on leader change.
 	ExperimentalEnableLeaseCheckpoint bool `json:"experimental-enable-lease-checkpoint"`
@@ -338,7 +388,11 @@ type Config struct {
 	// Deprecated in v3.6.
 	// TODO: Delete in v3.7
 	ExperimentalEnableLeaseCheckpointPersist bool `json:"experimental-enable-lease-checkpoint-persist"`
-	ExperimentalCompactionBatchLimit         int  `json:"experimental-compaction-batch-limit"`
+	// ExperimentalCompactionBatchLimit Sets the maximum revisions deleted in each compaction batch.
+	// Deprecated in v3.6 and will be decommissioned in v3.7.
+	// TODO: Delete in v3.7
+	ExperimentalCompactionBatchLimit int `json:"experimental-compaction-batch-limit"`
+	CompactionBatchLimit             int `json:"compaction-batch-limit"`
 	// ExperimentalCompactionSleepInterval is the sleep interval between every etcd compaction loop.
 	ExperimentalCompactionSleepInterval     time.Duration `json:"experimental-compaction-sleep-interval"`
 	ExperimentalWatchProgressNotifyInterval time.Duration `json:"experimental-watch-progress-notify-interval"`
@@ -428,8 +482,18 @@ type Config struct {
 	// ExperimentalTxnModeWriteWithSharedBuffer enables write transaction to use a shared buffer in its readonly check operations.
 	ExperimentalTxnModeWriteWithSharedBuffer bool `json:"experimental-txn-mode-write-with-shared-buffer"`
 
-	// V2Deprecation describes phase of API & Storage V2 support
+	// ExperimentalStopGRPCServiceOnDefrag enables etcd gRPC service to stop serving client requests on defragmentation.
+	ExperimentalStopGRPCServiceOnDefrag bool `json:"experimental-stop-grpc-service-on-defrag"`
+
+	// V2Deprecation describes phase of API & Storage V2 support.
+	// Deprecated and scheduled for removal in v3.8.
+	// Do not set this field for embedded use cases, as it has no effect. However, setting it will not cause any harm.
 	V2Deprecation config.V2DeprecationEnum `json:"v2-deprecation"`
+
+	// ServerFeatureGate is a server level feature gate
+	ServerFeatureGate featuregate.FeatureGate
+	// FlagsExplicitlySet stores if a flag is explicitly set from the cmd line or config file.
+	FlagsExplicitlySet map[string]bool
 }
 
 // configYAML holds the config suitable for yaml parsing
@@ -440,27 +504,31 @@ type configYAML struct {
 
 // configJSON has file options that are translated into Config options
 type configJSON struct {
-	ListenPeerUrls       string `json:"listen-peer-urls"`
-	ListenClientUrls     string `json:"listen-client-urls"`
-	ListenClientHttpUrls string `json:"listen-client-http-urls"`
-	AdvertisePeerUrls    string `json:"initial-advertise-peer-urls"`
-	AdvertiseClientUrls  string `json:"advertise-client-urls"`
+	ListenPeerURLs       string `json:"listen-peer-urls"`
+	ListenClientURLs     string `json:"listen-client-urls"`
+	ListenClientHTTPURLs string `json:"listen-client-http-urls"`
+	AdvertisePeerURLs    string `json:"initial-advertise-peer-urls"`
+	AdvertiseClientURLs  string `json:"advertise-client-urls"`
 
 	CORSJSON          string `json:"cors"`
 	HostWhitelistJSON string `json:"host-whitelist"`
 
 	ClientSecurityJSON securityConfig `json:"client-transport-security"`
 	PeerSecurityJSON   securityConfig `json:"peer-transport-security"`
+
+	ServerFeatureGatesJSON string `json:"feature-gates"`
 }
 
 type securityConfig struct {
-	CertFile       string `json:"cert-file"`
-	KeyFile        string `json:"key-file"`
-	ClientCertFile string `json:"client-cert-file"`
-	ClientKeyFile  string `json:"client-key-file"`
-	CertAuth       bool   `json:"client-cert-auth"`
-	TrustedCAFile  string `json:"trusted-ca-file"`
-	AutoTLS        bool   `json:"auto-tls"`
+	CertFile         string   `json:"cert-file"`
+	KeyFile          string   `json:"key-file"`
+	ClientCertFile   string   `json:"client-cert-file"`
+	ClientKeyFile    string   `json:"client-key-file"`
+	CertAuth         bool     `json:"client-cert-auth"`
+	TrustedCAFile    string   `json:"trusted-ca-file"`
+	AutoTLS          bool     `json:"auto-tls"`
+	AllowedCNs       []string `json:"allowed-cn"`
+	AllowedHostnames []string `json:"allowed-hostname"`
 }
 
 // NewConfig creates a new Config populated with default values.
@@ -501,9 +569,8 @@ func NewConfig() *Config {
 		AdvertisePeerUrls:   []url.URL{*apurl},
 		AdvertiseClientUrls: []url.URL{*acurl},
 
-		ClusterState:                        ClusterStateFlagNew,
-		InitialClusterToken:                 "etcd-cluster",
-		ExperimentalWaitClusterReadyTimeout: DefaultWaitClusterReadyTimeout,
+		ClusterState:        ClusterStateFlagNew,
+		InitialClusterToken: "etcd-cluster",
 
 		StrictReconfigCheck: DefaultStrictReconfigCheck,
 		Metrics:             "basic",
@@ -511,7 +578,7 @@ func NewConfig() *Config {
 		CORS:          map[string]struct{}{"*": {}},
 		HostWhitelist: map[string]struct{}{"*": {}},
 
-		AuthToken:    "simple",
+		AuthToken:    DefaultAuthToken,
 		BcryptCost:   uint(bcrypt.DefaultCost),
 		AuthTokenTTL: 300,
 
@@ -526,15 +593,16 @@ func NewConfig() *Config {
 		LogRotationConfigJSON: DefaultLogRotationConfig,
 		EnableGRPCGateway:     true,
 
-		ExperimentalDowngradeCheckTime:           DefaultDowngradeCheckTime,
-		ExperimentalMemoryMlock:                  false,
-		ExperimentalTxnModeWriteWithSharedBuffer: true,
-		ExperimentalMaxLearners:                  membership.DefaultMaxLearners,
+		ExperimentalDowngradeCheckTime:      DefaultDowngradeCheckTime,
+		ExperimentalMemoryMlock:             false,
+		ExperimentalStopGRPCServiceOnDefrag: false,
+		ExperimentalMaxLearners:             membership.DefaultMaxLearners,
 
-		ExperimentalCompactHashCheckEnabled: false,
-		ExperimentalCompactHashCheckTime:    time.Minute,
+		CompactHashCheckTime: DefaultCompactHashCheckTime,
+		// TODO: delete in v3.7
+		ExperimentalCompactHashCheckTime: DefaultCompactHashCheckTime,
 
-		V2Deprecation: config.V2_DEPR_DEFAULT,
+		V2Deprecation: config.V2DeprDefault,
 
 		DiscoveryCfg: v3discovery.DiscoveryConfig{
 			ConfigSpec: clientv3.ConfigSpec{
@@ -549,9 +617,204 @@ func NewConfig() *Config {
 		},
 
 		AutoCompactionMode: DefaultAutoCompactionMode,
+		ServerFeatureGate:  features.NewDefaultServerFeatureGate(DefaultName, nil),
+		FlagsExplicitlySet: map[string]bool{},
 	}
 	cfg.InitialCluster = cfg.InitialClusterFromName(cfg.Name)
 	return cfg
+}
+
+func (cfg *Config) AddFlags(fs *flag.FlagSet) {
+	// member
+	fs.StringVar(&cfg.Dir, "data-dir", cfg.Dir, "Path to the data directory.")
+	fs.StringVar(&cfg.WalDir, "wal-dir", cfg.WalDir, "Path to the dedicated wal directory.")
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions(DefaultListenPeerURLs, ""),
+		"listen-peer-urls",
+		"List of URLs to listen on for peer traffic.",
+	)
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions(DefaultListenClientURLs, ""), "listen-client-urls",
+		"List of URLs to listen on for client grpc traffic and http as long as --listen-client-http-urls is not specified.",
+	)
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions("", ""), "listen-client-http-urls",
+		"List of URLs to listen on for http only client traffic. Enabling this flag removes http services from --listen-client-urls.",
+	)
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions("", ""),
+		"listen-metrics-urls",
+		"List of URLs to listen on for the metrics and health endpoints.",
+	)
+	fs.UintVar(&cfg.MaxSnapFiles, "max-snapshots", cfg.MaxSnapFiles, "Maximum number of snapshot files to retain (0 is unlimited). Deprecated in v3.6 and will be decommissioned in v3.7.")
+	fs.UintVar(&cfg.MaxWalFiles, "max-wals", cfg.MaxWalFiles, "Maximum number of wal files to retain (0 is unlimited).")
+	fs.StringVar(&cfg.Name, "name", cfg.Name, "Human-readable name for this member.")
+	fs.Uint64Var(&cfg.SnapshotCount, "snapshot-count", cfg.SnapshotCount, "Number of committed transactions to trigger a snapshot to disk. Deprecated in v3.6 and will be decommissioned in v3.7.")
+	fs.UintVar(&cfg.TickMs, "heartbeat-interval", cfg.TickMs, "Time (in milliseconds) of a heartbeat interval.")
+	fs.UintVar(&cfg.ElectionMs, "election-timeout", cfg.ElectionMs, "Time (in milliseconds) for an election to timeout.")
+	fs.BoolVar(&cfg.InitialElectionTickAdvance, "initial-election-tick-advance", cfg.InitialElectionTickAdvance, "Whether to fast-forward initial election ticks on boot for faster election.")
+	fs.Int64Var(&cfg.QuotaBackendBytes, "quota-backend-bytes", cfg.QuotaBackendBytes, "Raise alarms when backend size exceeds the given quota. 0 means use the default quota.")
+	fs.StringVar(&cfg.BackendFreelistType, "backend-bbolt-freelist-type", cfg.BackendFreelistType, "BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types)")
+	fs.DurationVar(&cfg.BackendBatchInterval, "backend-batch-interval", cfg.BackendBatchInterval, "BackendBatchInterval is the maximum time before commit the backend transaction.")
+	fs.IntVar(&cfg.BackendBatchLimit, "backend-batch-limit", cfg.BackendBatchLimit, "BackendBatchLimit is the maximum operations before commit the backend transaction.")
+	fs.UintVar(&cfg.MaxTxnOps, "max-txn-ops", cfg.MaxTxnOps, "Maximum number of operations permitted in a transaction.")
+	fs.UintVar(&cfg.MaxRequestBytes, "max-request-bytes", cfg.MaxRequestBytes, "Maximum client request size in bytes the server will accept.")
+	fs.DurationVar(&cfg.GRPCKeepAliveMinTime, "grpc-keepalive-min-time", cfg.GRPCKeepAliveMinTime, "Minimum interval duration that a client should wait before pinging server.")
+	fs.DurationVar(&cfg.GRPCKeepAliveInterval, "grpc-keepalive-interval", cfg.GRPCKeepAliveInterval, "Frequency duration of server-to-client ping to check if a connection is alive (0 to disable).")
+	fs.DurationVar(&cfg.GRPCKeepAliveTimeout, "grpc-keepalive-timeout", cfg.GRPCKeepAliveTimeout, "Additional duration of wait before closing a non-responsive connection (0 to disable).")
+	fs.BoolVar(&cfg.SocketOpts.ReusePort, "socket-reuse-port", cfg.SocketOpts.ReusePort, "Enable to set socket option SO_REUSEPORT on listeners allowing rebinding of a port already in use.")
+	fs.BoolVar(&cfg.SocketOpts.ReuseAddress, "socket-reuse-address", cfg.SocketOpts.ReuseAddress, "Enable to set socket option SO_REUSEADDR on listeners allowing binding to an address in `TIME_WAIT` state.")
+
+	fs.Var(flags.NewUint32Value(cfg.MaxConcurrentStreams), "max-concurrent-streams", "Maximum concurrent streams that each client can open at a time.")
+
+	// raft connection timeouts
+	fs.DurationVar(&rafthttp.ConnReadTimeout, "raft-read-timeout", rafthttp.DefaultConnReadTimeout, "Read timeout set on each rafthttp connection")
+	fs.DurationVar(&rafthttp.ConnWriteTimeout, "raft-write-timeout", rafthttp.DefaultConnWriteTimeout, "Write timeout set on each rafthttp connection")
+
+	// clustering
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions(DefaultInitialAdvertisePeerURLs, ""),
+		"initial-advertise-peer-urls",
+		"List of this member's peer URLs to advertise to the rest of the cluster.",
+	)
+	fs.BoolVar(&cfg.ExperimentalSetMemberLocalAddr, "experimental-set-member-localaddr", false, "Enable to have etcd use the first specified and non-loopback host from initial-advertise-peer-urls as the local address when communicating with a peer.")
+
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions(DefaultAdvertiseClientURLs, ""),
+		"advertise-client-urls",
+		"List of this member's client URLs to advertise to the public.",
+	)
+
+	fs.StringVar(&cfg.Durl, "discovery", cfg.Durl, "Discovery URL used to bootstrap the cluster for v2 discovery. Will be deprecated in v3.7, and be decommissioned in v3.8.")
+
+	fs.Var(
+		flags.NewUniqueStringsValue(""),
+		"discovery-endpoints",
+		"V3 discovery: List of gRPC endpoints of the discovery service.",
+	)
+	fs.StringVar(&cfg.DiscoveryCfg.Token, "discovery-token", "", "V3 discovery: discovery token for the etcd cluster to be bootstrapped.")
+	fs.DurationVar(&cfg.DiscoveryCfg.DialTimeout, "discovery-dial-timeout", cfg.DiscoveryCfg.DialTimeout, "V3 discovery: dial timeout for client connections.")
+	fs.DurationVar(&cfg.DiscoveryCfg.RequestTimeout, "discovery-request-timeout", cfg.DiscoveryCfg.RequestTimeout, "V3 discovery: timeout for discovery requests (excluding dial timeout).")
+	fs.DurationVar(&cfg.DiscoveryCfg.KeepAliveTime, "discovery-keepalive-time", cfg.DiscoveryCfg.KeepAliveTime, "V3 discovery: keepalive time for client connections.")
+	fs.DurationVar(&cfg.DiscoveryCfg.KeepAliveTimeout, "discovery-keepalive-timeout", cfg.DiscoveryCfg.KeepAliveTimeout, "V3 discovery: keepalive timeout for client connections.")
+	fs.BoolVar(&cfg.DiscoveryCfg.Secure.InsecureTransport, "discovery-insecure-transport", true, "V3 discovery: disable transport security for client connections.")
+	fs.BoolVar(&cfg.DiscoveryCfg.Secure.InsecureSkipVerify, "discovery-insecure-skip-tls-verify", false, "V3 discovery: skip server certificate verification (CAUTION: this option should be enabled only for testing purposes).")
+	fs.StringVar(&cfg.DiscoveryCfg.Secure.Cert, "discovery-cert", "", "V3 discovery: identify secure client using this TLS certificate file.")
+	fs.StringVar(&cfg.DiscoveryCfg.Secure.Key, "discovery-key", "", "V3 discovery: identify secure client using this TLS key file.")
+	fs.StringVar(&cfg.DiscoveryCfg.Secure.Cacert, "discovery-cacert", "", "V3 discovery: verify certificates of TLS-enabled secure servers using this CA bundle.")
+	fs.StringVar(&cfg.DiscoveryCfg.Auth.Username, "discovery-user", "", "V3 discovery: username[:password] for authentication (prompt if password is not supplied).")
+	fs.StringVar(&cfg.DiscoveryCfg.Auth.Password, "discovery-password", "", "V3 discovery: password for authentication (if this option is used, --user option shouldn't include password).")
+
+	fs.StringVar(&cfg.Dproxy, "discovery-proxy", cfg.Dproxy, "HTTP proxy to use for traffic to discovery service. Will be deprecated in v3.7, and be decommissioned in v3.8.")
+	fs.StringVar(&cfg.DNSCluster, "discovery-srv", cfg.DNSCluster, "DNS domain used to bootstrap initial cluster.")
+	fs.StringVar(&cfg.DNSClusterServiceName, "discovery-srv-name", cfg.DNSClusterServiceName, "Service name to query when using DNS discovery.")
+	fs.StringVar(&cfg.InitialCluster, "initial-cluster", cfg.InitialCluster, "Initial cluster configuration for bootstrapping.")
+	fs.StringVar(&cfg.InitialClusterToken, "initial-cluster-token", cfg.InitialClusterToken, "Initial cluster token for the etcd cluster during bootstrap.")
+	fs.BoolVar(&cfg.StrictReconfigCheck, "strict-reconfig-check", cfg.StrictReconfigCheck, "Reject reconfiguration requests that would cause quorum loss.")
+
+	fs.BoolVar(&cfg.PreVote, "pre-vote", cfg.PreVote, "Enable the raft Pre-Vote algorithm to prevent disruption when a node that has been partitioned away rejoins the cluster.")
+
+	// security
+	fs.StringVar(&cfg.ClientTLSInfo.CertFile, "cert-file", "", "Path to the client server TLS cert file.")
+	fs.StringVar(&cfg.ClientTLSInfo.KeyFile, "key-file", "", "Path to the client server TLS key file.")
+	fs.StringVar(&cfg.ClientTLSInfo.ClientCertFile, "client-cert-file", "", "Path to an explicit peer client TLS cert file otherwise cert file will be used when client auth is required.")
+	fs.StringVar(&cfg.ClientTLSInfo.ClientKeyFile, "client-key-file", "", "Path to an explicit peer client TLS key file otherwise key file will be used when client auth is required.")
+	fs.BoolVar(&cfg.ClientTLSInfo.ClientCertAuth, "client-cert-auth", false, "Enable client cert authentication.")
+	fs.StringVar(&cfg.ClientTLSInfo.CRLFile, "client-crl-file", "", "Path to the client certificate revocation list file.")
+	fs.Var(flags.NewStringsValue(""), "client-cert-allowed-hostname", "Comma-separated list of allowed SAN hostnames for client cert authentication.")
+	fs.StringVar(&cfg.ClientTLSInfo.TrustedCAFile, "trusted-ca-file", "", "Path to the client server TLS trusted CA cert file.")
+	fs.BoolVar(&cfg.ClientAutoTLS, "auto-tls", false, "Client TLS using generated certificates")
+	fs.StringVar(&cfg.PeerTLSInfo.CertFile, "peer-cert-file", "", "Path to the peer server TLS cert file.")
+	fs.StringVar(&cfg.PeerTLSInfo.KeyFile, "peer-key-file", "", "Path to the peer server TLS key file.")
+	fs.StringVar(&cfg.PeerTLSInfo.ClientCertFile, "peer-client-cert-file", "", "Path to an explicit peer client TLS cert file otherwise peer cert file will be used when client auth is required.")
+	fs.StringVar(&cfg.PeerTLSInfo.ClientKeyFile, "peer-client-key-file", "", "Path to an explicit peer client TLS key file otherwise peer key file will be used when client auth is required.")
+	fs.BoolVar(&cfg.PeerTLSInfo.ClientCertAuth, "peer-client-cert-auth", false, "Enable peer client cert authentication.")
+	fs.StringVar(&cfg.PeerTLSInfo.TrustedCAFile, "peer-trusted-ca-file", "", "Path to the peer server TLS trusted CA file.")
+	fs.BoolVar(&cfg.PeerAutoTLS, "peer-auto-tls", false, "Peer TLS using generated certificates")
+	fs.UintVar(&cfg.SelfSignedCertValidity, "self-signed-cert-validity", 1, "The validity period of the client and peer certificates, unit is year")
+	fs.StringVar(&cfg.PeerTLSInfo.CRLFile, "peer-crl-file", "", "Path to the peer certificate revocation list file.")
+	fs.Var(flags.NewStringsValue(""), "peer-cert-allowed-cn", "Comma-separated list of allowed CNs for inter-peer TLS authentication.")
+	fs.Var(flags.NewStringsValue(""), "peer-cert-allowed-hostname", "Comma-separated list of allowed SAN hostnames for inter-peer TLS authentication.")
+	fs.Var(flags.NewStringsValue(""), "cipher-suites", "Comma-separated list of supported TLS cipher suites between client/server and peers (empty will be auto-populated by Go).")
+	fs.BoolVar(&cfg.PeerTLSInfo.SkipClientSANVerify, "experimental-peer-skip-client-san-verification", false, "Skip verification of SAN field in client certificate for peer connections.")
+	fs.StringVar(&cfg.TlsMinVersion, "tls-min-version", string(tlsutil.TLSVersion12), "Minimum TLS version supported by etcd. Possible values: TLS1.2, TLS1.3.")
+	fs.StringVar(&cfg.TlsMaxVersion, "tls-max-version", string(tlsutil.TLSVersionDefault), "Maximum TLS version supported by etcd. Possible values: TLS1.2, TLS1.3 (empty defers to Go).")
+
+	fs.Var(
+		flags.NewUniqueURLsWithExceptions("*", "*"),
+		"cors",
+		"Comma-separated white list of origins for CORS, or cross-origin resource sharing, (empty or * means allow all)",
+	)
+	fs.Var(flags.NewUniqueStringsValue("*"), "host-whitelist", "Comma-separated acceptable hostnames from HTTP client requests, if server is not secure (empty means allow all).")
+
+	// logging
+	fs.StringVar(&cfg.Logger, "logger", "zap", "Currently only supports 'zap' for structured logging.")
+	fs.Var(flags.NewUniqueStringsValue(DefaultLogOutput), "log-outputs", "Specify 'stdout' or 'stderr' to skip journald logging even when running under systemd, or list of comma separated output targets.")
+	fs.StringVar(&cfg.LogLevel, "log-level", logutil.DefaultLogLevel, "Configures log level. Only supports debug, info, warn, error, panic, or fatal. Default 'info'.")
+	fs.StringVar(&cfg.LogFormat, "log-format", logutil.DefaultLogFormat, "Configures log format. Only supports json, console. Default is 'json'.")
+	fs.BoolVar(&cfg.EnableLogRotation, "enable-log-rotation", false, "Enable log rotation of a single log-outputs file target.")
+	fs.StringVar(&cfg.LogRotationConfigJSON, "log-rotation-config-json", DefaultLogRotationConfig, "Configures log rotation if enabled with a JSON logger config. Default: MaxSize=100(MB), MaxAge=0(days,no limit), MaxBackups=0(no limit), LocalTime=false(UTC), Compress=false(gzip)")
+
+	fs.StringVar(&cfg.AutoCompactionRetention, "auto-compaction-retention", "0", "Auto compaction retention for mvcc key value store. 0 means disable auto compaction.")
+	fs.StringVar(&cfg.AutoCompactionMode, "auto-compaction-mode", "periodic", "interpret 'auto-compaction-retention' one of: periodic|revision. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention.")
+
+	// pprof profiler via HTTP
+	fs.BoolVar(&cfg.EnablePprof, "enable-pprof", false, "Enable runtime profiling data via HTTP server. Address is at client URL + \"/debug/pprof/\"")
+
+	// additional metrics
+	fs.StringVar(&cfg.Metrics, "metrics", cfg.Metrics, "Set level of detail for exported metrics, specify 'extensive' to include server side grpc histogram metrics")
+
+	// experimental distributed tracing
+	fs.BoolVar(&cfg.ExperimentalEnableDistributedTracing, "experimental-enable-distributed-tracing", false, "Enable experimental distributed  tracing using OpenTelemetry Tracing.")
+	fs.StringVar(&cfg.ExperimentalDistributedTracingAddress, "experimental-distributed-tracing-address", ExperimentalDistributedTracingAddress, "Address for distributed tracing used for OpenTelemetry Tracing (if enabled with experimental-enable-distributed-tracing flag).")
+	fs.StringVar(&cfg.ExperimentalDistributedTracingServiceName, "experimental-distributed-tracing-service-name", ExperimentalDistributedTracingServiceName, "Configures service name for distributed tracing to be used to define service name for OpenTelemetry Tracing (if enabled with experimental-enable-distributed-tracing flag). 'etcd' is the default service name. Use the same service name for all instances of etcd.")
+	fs.StringVar(&cfg.ExperimentalDistributedTracingServiceInstanceID, "experimental-distributed-tracing-instance-id", "", "Configures service instance ID for distributed tracing to be used to define service instance ID key for OpenTelemetry Tracing (if enabled with experimental-enable-distributed-tracing flag). There is no default value set. This ID must be unique per etcd instance.")
+	fs.IntVar(&cfg.ExperimentalDistributedTracingSamplingRatePerMillion, "experimental-distributed-tracing-sampling-rate", 0, "Number of samples to collect per million spans for OpenTelemetry Tracing (if enabled with experimental-enable-distributed-tracing flag).")
+
+	// auth
+	fs.StringVar(&cfg.AuthToken, "auth-token", cfg.AuthToken, "Specify auth token specific options.")
+	fs.UintVar(&cfg.BcryptCost, "bcrypt-cost", cfg.BcryptCost, "Specify bcrypt algorithm cost factor for auth password hashing.")
+	fs.UintVar(&cfg.AuthTokenTTL, "auth-token-ttl", cfg.AuthTokenTTL, "The lifetime in seconds of the auth token.")
+
+	// gateway
+	fs.BoolVar(&cfg.EnableGRPCGateway, "enable-grpc-gateway", cfg.EnableGRPCGateway, "Enable GRPC gateway.")
+
+	// experimental
+	fs.BoolVar(&cfg.ExperimentalInitialCorruptCheck, "experimental-initial-corrupt-check", cfg.ExperimentalInitialCorruptCheck, "Enable to check data corruption before serving any client/peer traffic.")
+	// TODO: delete in v3.7
+	fs.DurationVar(&cfg.ExperimentalCorruptCheckTime, "experimental-corrupt-check-time", cfg.ExperimentalCorruptCheckTime, "Duration of time between cluster corruption check passes. Deprecated in v3.6 and will be decommissioned in v3.7. Use --corrupt-check-time instead")
+	fs.DurationVar(&cfg.CorruptCheckTime, "corrupt-check-time", cfg.CorruptCheckTime, "Duration of time between cluster corruption check passes.")
+	// TODO: delete in v3.7
+	fs.BoolVar(&cfg.ExperimentalCompactHashCheckEnabled, "experimental-compact-hash-check-enabled", cfg.ExperimentalCompactHashCheckEnabled, "Enable leader to periodically check followers compaction hashes. Deprecated in v3.6 and will be decommissioned in v3.7. Use '--feature-gates=CompactHashCheck=true' instead")
+	fs.DurationVar(&cfg.ExperimentalCompactHashCheckTime, "experimental-compact-hash-check-time", cfg.ExperimentalCompactHashCheckTime, "Duration of time between leader checks followers compaction hashes. Deprecated in v3.6 and will be decommissioned in v3.7. Use --compact-hash-check-time instead.")
+
+	fs.DurationVar(&cfg.CompactHashCheckTime, "compact-hash-check-time", cfg.CompactHashCheckTime, "Duration of time between leader checks followers compaction hashes.")
+
+	fs.BoolVar(&cfg.ExperimentalEnableLeaseCheckpoint, "experimental-enable-lease-checkpoint", false, "Enable leader to send regular checkpoints to other members to prevent reset of remaining TTL on leader change.")
+	// TODO: delete in v3.7
+	fs.BoolVar(&cfg.ExperimentalEnableLeaseCheckpointPersist, "experimental-enable-lease-checkpoint-persist", false, "Enable persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled. Requires experimental-enable-lease-checkpoint to be enabled.")
+	// TODO: delete in v3.7
+	fs.IntVar(&cfg.ExperimentalCompactionBatchLimit, "experimental-compaction-batch-limit", cfg.ExperimentalCompactionBatchLimit, "Sets the maximum revisions deleted in each compaction batch. Deprecated in v3.6 and will be decommissioned in v3.7. Use --compaction-batch-limit instead.")
+	fs.IntVar(&cfg.CompactionBatchLimit, "compaction-batch-limit", cfg.CompactionBatchLimit, "Sets the maximum revisions deleted in each compaction batch.")
+	fs.DurationVar(&cfg.ExperimentalCompactionSleepInterval, "experimental-compaction-sleep-interval", cfg.ExperimentalCompactionSleepInterval, "Sets the sleep interval between each compaction batch.")
+	fs.DurationVar(&cfg.ExperimentalWatchProgressNotifyInterval, "experimental-watch-progress-notify-interval", cfg.ExperimentalWatchProgressNotifyInterval, "Duration of periodic watch progress notifications.")
+	fs.DurationVar(&cfg.ExperimentalDowngradeCheckTime, "experimental-downgrade-check-time", cfg.ExperimentalDowngradeCheckTime, "Duration of time between two downgrade status checks.")
+	fs.DurationVar(&cfg.ExperimentalWarningApplyDuration, "experimental-warning-apply-duration", cfg.ExperimentalWarningApplyDuration, "Time duration after which a warning is generated if request takes more time.")
+	fs.DurationVar(&cfg.WarningUnaryRequestDuration, "warning-unary-request-duration", cfg.WarningUnaryRequestDuration, "Time duration after which a warning is generated if a unary request takes more time.")
+	fs.DurationVar(&cfg.ExperimentalWarningUnaryRequestDuration, "experimental-warning-unary-request-duration", cfg.ExperimentalWarningUnaryRequestDuration, "Time duration after which a warning is generated if a unary request takes more time. It's deprecated, and will be decommissioned in v3.7. Use --warning-unary-request-duration instead.")
+	fs.BoolVar(&cfg.ExperimentalMemoryMlock, "experimental-memory-mlock", cfg.ExperimentalMemoryMlock, "Enable to enforce etcd pages (in particular bbolt) to stay in RAM.")
+	fs.BoolVar(&cfg.ExperimentalTxnModeWriteWithSharedBuffer, "experimental-txn-mode-write-with-shared-buffer", true, "Enable the write transaction to use a shared buffer in its readonly check operations.")
+	fs.BoolVar(&cfg.ExperimentalStopGRPCServiceOnDefrag, "experimental-stop-grpc-service-on-defrag", cfg.ExperimentalStopGRPCServiceOnDefrag, "Enable etcd gRPC service to stop serving client requests on defragmentation.")
+	fs.UintVar(&cfg.ExperimentalBootstrapDefragThresholdMegabytes, "experimental-bootstrap-defrag-threshold-megabytes", 0, "Enable the defrag during etcd server bootstrap on condition that it will free at least the provided threshold of disk space. Needs to be set to non-zero value to take effect.")
+	fs.IntVar(&cfg.ExperimentalMaxLearners, "experimental-max-learners", membership.DefaultMaxLearners, "Sets the maximum number of learners that can be available in the cluster membership.")
+	fs.Uint64Var(&cfg.SnapshotCatchUpEntries, "experimental-snapshot-catchup-entries", cfg.SnapshotCatchUpEntries, "Number of entries for a slow follower to catch up after compacting the raft storage entries.")
+
+	// unsafe
+	fs.BoolVar(&cfg.UnsafeNoFsync, "unsafe-no-fsync", false, "Disables fsync, unsafe, will cause data loss.")
+	fs.BoolVar(&cfg.ForceNewCluster, "force-new-cluster", false, "Force to create a new one member cluster.")
+
+	// featuregate
+	cfg.ServerFeatureGate.(featuregate.MutableFeatureGate).AddFlag(fs, ServerFeatureGateFlagName)
 }
 
 func ConfigFromFile(path string) (*Config, error) {
@@ -575,8 +838,39 @@ func (cfg *configYAML) configFromFile(path string) error {
 		return err
 	}
 
-	if cfg.configJSON.ListenPeerUrls != "" {
-		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenPeerUrls, ","))
+	if cfg.configJSON.ServerFeatureGatesJSON != "" {
+		err = cfg.Config.ServerFeatureGate.(featuregate.MutableFeatureGate).Set(cfg.configJSON.ServerFeatureGatesJSON)
+		if err != nil {
+			return err
+		}
+	}
+
+	// parses the yaml bytes to raw map first, then getBoolFlagVal can get the top level bool flag value.
+	var cfgMap map[string]any
+	err = yaml.Unmarshal(b, &cfgMap)
+	if err != nil {
+		return err
+	}
+
+	for flg := range cfgMap {
+		cfg.FlagsExplicitlySet[flg] = true
+	}
+
+	getBoolFlagVal := func(flagName string) *bool {
+		flagVal, ok := cfgMap[flagName]
+		if !ok {
+			return nil
+		}
+		boolVal := flagVal.(bool)
+		return &boolVal
+	}
+	err = SetFeatureGatesFromExperimentalFlags(cfg.ServerFeatureGate, getBoolFlagVal, cfg.configJSON.ServerFeatureGatesJSON)
+	if err != nil {
+		return err
+	}
+
+	if cfg.configJSON.ListenPeerURLs != "" {
+		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenPeerURLs, ","))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unexpected error setting up listen-peer-urls: %v\n", err)
 			os.Exit(1)
@@ -584,8 +878,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		cfg.Config.ListenPeerUrls = u
 	}
 
-	if cfg.configJSON.ListenClientUrls != "" {
-		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenClientUrls, ","))
+	if cfg.configJSON.ListenClientURLs != "" {
+		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenClientURLs, ","))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unexpected error setting up listen-client-urls: %v\n", err)
 			os.Exit(1)
@@ -593,8 +887,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		cfg.Config.ListenClientUrls = u
 	}
 
-	if cfg.configJSON.ListenClientHttpUrls != "" {
-		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenClientHttpUrls, ","))
+	if cfg.configJSON.ListenClientHTTPURLs != "" {
+		u, err := types.NewURLs(strings.Split(cfg.configJSON.ListenClientHTTPURLs, ","))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unexpected error setting up listen-client-http-urls: %v\n", err)
 			os.Exit(1)
@@ -602,8 +896,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		cfg.Config.ListenClientHttpUrls = u
 	}
 
-	if cfg.configJSON.AdvertisePeerUrls != "" {
-		u, err := types.NewURLs(strings.Split(cfg.configJSON.AdvertisePeerUrls, ","))
+	if cfg.configJSON.AdvertisePeerURLs != "" {
+		u, err := types.NewURLs(strings.Split(cfg.configJSON.AdvertisePeerURLs, ","))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unexpected error setting up initial-advertise-peer-urls: %v\n", err)
 			os.Exit(1)
@@ -611,8 +905,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		cfg.Config.AdvertisePeerUrls = u
 	}
 
-	if cfg.configJSON.AdvertiseClientUrls != "" {
-		u, err := types.NewURLs(strings.Split(cfg.configJSON.AdvertiseClientUrls, ","))
+	if cfg.configJSON.AdvertiseClientURLs != "" {
+		u, err := types.NewURLs(strings.Split(cfg.configJSON.AdvertiseClientURLs, ","))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unexpected error setting up advertise-peer-urls: %v\n", err)
 			os.Exit(1)
@@ -654,6 +948,8 @@ func (cfg *configYAML) configFromFile(path string) error {
 		tls.ClientKeyFile = ysc.ClientKeyFile
 		tls.ClientCertAuth = ysc.CertAuth
 		tls.TrustedCAFile = ysc.TrustedCAFile
+		tls.AllowedCNs = ysc.AllowedCNs
+		tls.AllowedHostnames = ysc.AllowedHostnames
 	}
 	copySecurityDetails(&cfg.ClientTLSInfo, &cfg.ClientSecurityJSON)
 	copySecurityDetails(&cfg.PeerTLSInfo, &cfg.PeerSecurityJSON)
@@ -663,6 +959,36 @@ func (cfg *configYAML) configFromFile(path string) error {
 		cfg.SelfSignedCertValidity = 1
 	}
 	return cfg.Validate()
+}
+
+// SetFeatureGatesFromExperimentalFlags sets the feature gate values if the feature gate is not explicitly set
+// while their corresponding experimental flags are explicitly set, for all the features in ExperimentalFlagToFeatureMap.
+// TODO: remove after all experimental flags are deprecated.
+func SetFeatureGatesFromExperimentalFlags(fg featuregate.FeatureGate, getExperimentalFlagVal func(string) *bool, featureGatesVal string) error {
+	m := make(map[featuregate.Feature]bool)
+	// verify that the feature gate and its experimental flag are not both set at the same time.
+	for expFlagName, featureName := range features.ExperimentalFlagToFeatureMap {
+		flagVal := getExperimentalFlagVal(expFlagName)
+		if flagVal == nil {
+			continue
+		}
+		if strings.Contains(featureGatesVal, string(featureName)) {
+			return fmt.Errorf("cannot specify both flags: --%s=%v and --%s=%s=%v at the same time, please just use --%s=%s=%v",
+				expFlagName, *flagVal, ServerFeatureGateFlagName, featureName, fg.Enabled(featureName), ServerFeatureGateFlagName, featureName, fg.Enabled(featureName))
+		}
+		m[featureName] = *flagVal
+	}
+
+	// filter out unknown features for fg, because we could use SetFeatureGatesFromExperimentalFlags both for
+	// server and cluster level feature gates.
+	allFeatures := fg.(featuregate.MutableFeatureGate).GetAll()
+	mFiltered := make(map[string]bool)
+	for k, v := range m {
+		if _, ok := allFeatures[k]; ok {
+			mFiltered[string(k)] = v
+		}
+	}
+	return fg.(featuregate.MutableFeatureGate).SetFromMap(mFiltered)
 }
 
 func updateCipherSuites(tls *transport.TLSInfo, ss []string) error {
@@ -692,6 +1018,14 @@ func updateMinMaxVersions(info *transport.TLSInfo, min, max string) {
 
 // Validate ensures that '*embed.Config' fields are properly configured.
 func (cfg *Config) Validate() error {
+	// make sure there is no conflict in the flag settings in the ExperimentalNonBoolFlagMigrationMap
+	// TODO: delete in v3.7
+	for oldFlag, newFlag := range experimentalNonBoolFlagMigrationMap {
+		if cfg.FlagsExplicitlySet[oldFlag] && cfg.FlagsExplicitlySet[newFlag] {
+			return fmt.Errorf("cannot set --%s and --%s at the same time, please use --%s only", oldFlag, newFlag, newFlag)
+		}
+	}
+
 	if err := cfg.setupLogging(); err != nil {
 		return err
 	}
@@ -711,12 +1045,12 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 	if err := checkHostURLs(cfg.AdvertisePeerUrls); err != nil {
-		addrs := cfg.getAdvertisePeerUrls()
-		return fmt.Errorf(`--initial-advertise-peer-urls %q must be "host:port" (%v)`, strings.Join(addrs, ","), err)
+		addrs := cfg.getAdvertisePeerURLs()
+		return fmt.Errorf(`--initial-advertise-peer-urls %q must be "host:port" (%w)`, strings.Join(addrs, ","), err)
 	}
 	if err := checkHostURLs(cfg.AdvertiseClientUrls); err != nil {
-		addrs := cfg.getAdvertiseClientUrls()
-		return fmt.Errorf(`--advertise-client-urls %q must be "host:port" (%v)`, strings.Join(addrs, ","), err)
+		addrs := cfg.getAdvertiseClientURLs()
+		return fmt.Errorf(`--advertise-client-urls %q must be "host:port" (%w)`, strings.Join(addrs, ","), err)
 	}
 	// Check if conflicting flags are passed.
 	nSet := 0
@@ -785,7 +1119,7 @@ func (cfg *Config) Validate() error {
 	// Validate distributed tracing configuration but only if enabled.
 	if cfg.ExperimentalEnableDistributedTracing {
 		if err := validateTracingConfig(cfg.ExperimentalDistributedTracingSamplingRatePerMillion); err != nil {
-			return fmt.Errorf("distributed tracing configurition is not valid: (%v)", err)
+			return fmt.Errorf("distributed tracing configurition is not valid: (%w)", err)
 		}
 	}
 
@@ -796,9 +1130,12 @@ func (cfg *Config) Validate() error {
 	if cfg.ExperimentalEnableLeaseCheckpointPersist && !cfg.ExperimentalEnableLeaseCheckpoint {
 		return fmt.Errorf("setting experimental-enable-lease-checkpoint-persist requires experimental-enable-lease-checkpoint")
 	}
-
+	// TODO: delete in v3.7
 	if cfg.ExperimentalCompactHashCheckTime <= 0 {
 		return fmt.Errorf("--experimental-compact-hash-check-time must be >0 (set to %v)", cfg.ExperimentalCompactHashCheckTime)
+	}
+	if cfg.CompactHashCheckTime <= 0 {
+		return fmt.Errorf("--compact-hash-check-time must be >0 (set to %v)", cfg.CompactHashCheckTime)
 	}
 
 	// If `--name` isn't configured, then multiple members may have the same "default" name.
@@ -914,7 +1251,7 @@ func (cfg *Config) GetDNSClusterNames() ([]string, error) {
 		zap.String("service-name", "etcd-server-ssl"+serviceNameSuffix),
 		zap.String("server-name", cfg.Name),
 		zap.String("discovery-srv", cfg.DNSCluster),
-		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerUrls()),
+		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerURLs()),
 		zap.Strings("found-cluster", clusterStrs),
 		zap.Error(cerr),
 	)
@@ -929,15 +1266,15 @@ func (cfg *Config) GetDNSClusterNames() ([]string, error) {
 		zap.String("service-name", "etcd-server"+serviceNameSuffix),
 		zap.String("server-name", cfg.Name),
 		zap.String("discovery-srv", cfg.DNSCluster),
-		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerUrls()),
+		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerURLs()),
 		zap.Strings("found-cluster", clusterStrs),
 		zap.Error(httpCerr),
 	)
 
-	return clusterStrs, multierr.Combine(cerr, httpCerr)
+	return clusterStrs, errors.Join(cerr, httpCerr)
 }
 
-func (cfg Config) InitialClusterFromName(name string) (ret string) {
+func (cfg *Config) InitialClusterFromName(name string) (ret string) {
 	if len(cfg.AdvertisePeerUrls) == 0 {
 		return ""
 	}
@@ -951,21 +1288,55 @@ func (cfg Config) InitialClusterFromName(name string) (ret string) {
 	return ret[1:]
 }
 
-func (cfg Config) IsNewCluster() bool { return cfg.ClusterState == ClusterStateFlagNew }
-func (cfg Config) ElectionTicks() int { return int(cfg.ElectionMs / cfg.TickMs) }
+// InferLocalAddr tries to determine the LocalAddr used when communicating with
+// an etcd peer. If SetMemberLocalAddr is true, then it will try to get the host
+// from AdvertisePeerUrls by searching for the first URL with a specified
+// non-loopback address. Otherwise, it defaults to empty string and the
+// LocalAddr used will be the default for the Golang HTTP client.
+func (cfg *Config) InferLocalAddr() string {
+	if !cfg.ExperimentalSetMemberLocalAddr {
+		return ""
+	}
 
-func (cfg Config) V2DeprecationEffective() config.V2DeprecationEnum {
+	lg := cfg.GetLogger()
+	lg.Info(
+		"searching for a suitable member local address in AdvertisePeerURLs",
+		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerURLs()),
+	)
+	for _, peerURL := range cfg.AdvertisePeerUrls {
+		if addr, err := netip.ParseAddr(peerURL.Hostname()); err == nil {
+			if addr.IsLoopback() || addr.IsUnspecified() {
+				continue
+			}
+			lg.Info(
+				"setting member local address",
+				zap.String("LocalAddr", addr.String()),
+			)
+			return addr.String()
+		}
+	}
+	lg.Warn(
+		"unable to set a member local address due to lack of suitable local addresses",
+		zap.Strings("advertise-peer-urls", cfg.getAdvertisePeerURLs()),
+	)
+	return ""
+}
+
+func (cfg *Config) IsNewCluster() bool { return cfg.ClusterState == ClusterStateFlagNew }
+func (cfg *Config) ElectionTicks() int { return int(cfg.ElectionMs / cfg.TickMs) }
+
+func (cfg *Config) V2DeprecationEffective() config.V2DeprecationEnum {
 	if cfg.V2Deprecation == "" {
-		return config.V2_DEPR_DEFAULT
+		return config.V2DeprDefault
 	}
 	return cfg.V2Deprecation
 }
 
-func (cfg Config) defaultPeerHost() bool {
+func (cfg *Config) defaultPeerHost() bool {
 	return len(cfg.AdvertisePeerUrls) == 1 && cfg.AdvertisePeerUrls[0].String() == DefaultInitialAdvertisePeerURLs
 }
 
-func (cfg Config) defaultClientHost() bool {
+func (cfg *Config) defaultClientHost() bool {
 	return len(cfg.AdvertiseClientUrls) == 1 && cfg.AdvertiseClientUrls[0].String() == DefaultAdvertiseClientURLs
 }
 
@@ -1085,7 +1456,7 @@ func checkHostURLs(urls []url.URL) error {
 	return nil
 }
 
-func (cfg *Config) getAdvertisePeerUrls() (ss []string) {
+func (cfg *Config) getAdvertisePeerURLs() (ss []string) {
 	ss = make([]string, len(cfg.AdvertisePeerUrls))
 	for i := range cfg.AdvertisePeerUrls {
 		ss[i] = cfg.AdvertisePeerUrls[i].String()
@@ -1093,7 +1464,7 @@ func (cfg *Config) getAdvertisePeerUrls() (ss []string) {
 	return ss
 }
 
-func (cfg *Config) getListenPeerUrls() (ss []string) {
+func (cfg *Config) getListenPeerURLs() (ss []string) {
 	ss = make([]string, len(cfg.ListenPeerUrls))
 	for i := range cfg.ListenPeerUrls {
 		ss[i] = cfg.ListenPeerUrls[i].String()
@@ -1101,7 +1472,7 @@ func (cfg *Config) getListenPeerUrls() (ss []string) {
 	return ss
 }
 
-func (cfg *Config) getAdvertiseClientUrls() (ss []string) {
+func (cfg *Config) getAdvertiseClientURLs() (ss []string) {
 	ss = make([]string, len(cfg.AdvertiseClientUrls))
 	for i := range cfg.AdvertiseClientUrls {
 		ss[i] = cfg.AdvertiseClientUrls[i].String()
@@ -1109,18 +1480,10 @@ func (cfg *Config) getAdvertiseClientUrls() (ss []string) {
 	return ss
 }
 
-func (cfg *Config) getListenClientUrls() (ss []string) {
+func (cfg *Config) getListenClientURLs() (ss []string) {
 	ss = make([]string, len(cfg.ListenClientUrls))
 	for i := range cfg.ListenClientUrls {
 		ss[i] = cfg.ListenClientUrls[i].String()
-	}
-	return ss
-}
-
-func (cfg *Config) getListenClientHttpUrls() (ss []string) {
-	ss = make([]string, len(cfg.ListenClientHttpUrls))
-	for i := range cfg.ListenClientHttpUrls {
-		ss[i] = cfg.ListenClientHttpUrls[i].String()
 	}
 	return ss
 }

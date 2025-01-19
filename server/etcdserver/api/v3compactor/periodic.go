@@ -16,14 +16,15 @@ package v3compactor
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
-
 	"github.com/jonboulle/clockwork"
 	"go.uber.org/zap"
+
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
 )
 
 // Periodic compacts the log by purging revisions older than
@@ -139,7 +140,7 @@ func (pc *Periodic) Run() {
 			)
 			startTime := pc.clock.Now()
 			_, err := pc.c.Compact(pc.ctx, &pb.CompactionRequest{Revision: rev})
-			if err == nil || err == mvcc.ErrCompacted {
+			if err == nil || errors.Is(err, mvcc.ErrCompacted) {
 				pc.lg.Info(
 					"completed auto periodic compaction",
 					zap.Int64("revision", rev),

@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -34,50 +33,48 @@ import (
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
-// TestV3Curl_MaxStreams_BelowLimit_NoTLS_Small tests no TLS
-func TestV3Curl_MaxStreams_BelowLimit_NoTLS_Small(t *testing.T) {
-	testV3CurlMaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(3))
+// TestCurlV3_MaxStreams_BelowLimit_NoTLS_Small tests no TLS
+func TestCurlV3_MaxStreams_BelowLimit_NoTLS_Small(t *testing.T) {
+	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(3))
 }
 
-func TestV3Curl_MaxStreams_BelowLimit_NoTLS_Medium(t *testing.T) {
-	testV3CurlMaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
+func TestCurlV3_MaxStreams_BelowLimit_NoTLS_Medium(t *testing.T) {
+	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
 }
 
-func TestV3Curl_MaxStreamsNoTLS_BelowLimit_Large(t *testing.T) {
+func TestCurlV3_MaxStreamsNoTLS_BelowLimit_Large(t *testing.T) {
 	f, err := setRLimit(10240)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer f()
-	testV3CurlMaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(1000), withTestTimeout(200*time.Second))
+	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(1000), withTestTimeout(200*time.Second))
 }
 
-func TestV3Curl_MaxStreams_ReachLimit_NoTLS_Small(t *testing.T) {
-	testV3CurlMaxStream(t, true, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(3))
+func TestCurlV3_MaxStreams_ReachLimit_NoTLS_Small(t *testing.T) {
+	testCurlV3MaxStream(t, true, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(3))
 }
 
-func TestV3Curl_MaxStreams_ReachLimit_NoTLS_Medium(t *testing.T) {
-	testV3CurlMaxStream(t, true, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
+func TestCurlV3_MaxStreams_ReachLimit_NoTLS_Medium(t *testing.T) {
+	testCurlV3MaxStream(t, true, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
 }
 
-// TestV3Curl_MaxStreams_BelowLimit_TLS_Small tests with TLS
-func TestV3Curl_MaxStreams_BelowLimit_TLS_Small(t *testing.T) {
-	testV3CurlMaxStream(t, false, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(3))
+// TestCurlV3_MaxStreams_BelowLimit_TLS_Small tests with TLS
+func TestCurlV3_MaxStreams_BelowLimit_TLS_Small(t *testing.T) {
+	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(3))
 }
 
-func TestV3Curl_MaxStreams_BelowLimit_TLS_Medium(t *testing.T) {
-	testV3CurlMaxStream(t, false, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
+func TestCurlV3_MaxStreams_BelowLimit_TLS_Medium(t *testing.T) {
+	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
 }
 
-func TestV3Curl_MaxStreams_ReachLimit_TLS_Small(t *testing.T) {
-	testV3CurlMaxStream(t, true, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(3))
+func TestCurlV3_MaxStreams_ReachLimit_TLS_Small(t *testing.T) {
+	testCurlV3MaxStream(t, true, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(3))
 }
 
-func TestV3Curl_MaxStreams_ReachLimit_TLS_Medium(t *testing.T) {
-	testV3CurlMaxStream(t, true, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
+func TestCurlV3_MaxStreams_ReachLimit_TLS_Medium(t *testing.T) {
+	testCurlV3MaxStream(t, true, withCfg(*e2e.NewConfigTLS()), withMaxConcurrentStreams(100), withTestTimeout(20*time.Second))
 }
 
-func testV3CurlMaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
+func testCurlV3MaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 	e2e.BeforeTest(t)
 
 	// Step 1: generate configuration for creating cluster
@@ -92,9 +89,7 @@ func testV3CurlMaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 	// Step 2: create the cluster
 	t.Log("Creating an etcd cluster")
 	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, e2e.WithConfig(&cx.cfg))
-	if err != nil {
-		t.Fatalf("Failed to start etcd cluster: %v", err)
-	}
+	require.NoErrorf(t, err, "Failed to start etcd cluster")
 	cx.epc = epc
 	cx.dataDir = epc.Procs[0].Config().DataDirPath
 
@@ -102,15 +97,15 @@ func testV3CurlMaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 	//	(a) generate ${concurrentNumber} concurrent watch streams;
 	//	(b) submit a range request.
 	var wg sync.WaitGroup
-	concurrentNumber := cx.cfg.MaxConcurrentStreams - 1
+	concurrentNumber := cx.cfg.ServerConfig.MaxConcurrentStreams - 1
 	expectedResponse := `"revision":"`
 	if reachLimit {
-		concurrentNumber = cx.cfg.MaxConcurrentStreams
+		concurrentNumber = cx.cfg.ServerConfig.MaxConcurrentStreams
 		expectedResponse = "Operation timed out"
 	}
 	wg.Add(int(concurrentNumber))
 	t.Logf("Running the test, MaxConcurrentStreams: %d, concurrentNumber: %d, expected range's response: %s\n",
-		cx.cfg.MaxConcurrentStreams, concurrentNumber, expectedResponse)
+		cx.cfg.ServerConfig.MaxConcurrentStreams, concurrentNumber, expectedResponse)
 
 	closeServerCh := make(chan struct{})
 	submitConcurrentWatch(cx, int(concurrentNumber), &wg, closeServerCh)
@@ -119,7 +114,7 @@ func testV3CurlMaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 	// Step 4: Close the cluster
 	t.Log("Closing test cluster...")
 	close(closeServerCh)
-	assert.NoError(t, epc.Close())
+	require.NoError(t, epc.Close())
 	t.Log("Closed test cluster")
 
 	// Step 5: Waiting all watch goroutines to exit.
@@ -138,7 +133,7 @@ func testV3CurlMaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 		t.Log("All watch goroutines exited.")
 	}
 
-	t.Log("testV3CurlMaxStream done!")
+	t.Log("testCurlV3MaxStream done!")
 }
 
 func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeCh chan struct{}) {
@@ -147,9 +142,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 			Key: []byte("foo"),
 		},
 	})
-	if err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, err)
 
 	var wgSchedule sync.WaitGroup
 
@@ -169,7 +162,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 		expectedLine := `"created":true}}`
 		_, lerr := proc.ExpectWithContext(context.TODO(), expect.ExpectedResponse{Value: expectedLine})
 		if lerr != nil {
-			return fmt.Errorf("%v %v (expected %q). Try EXPECT_DEBUG=TRUE", args, lerr, expectedLine)
+			return fmt.Errorf("%v %w (expected %q). Try EXPECT_DEBUG=TRUE", args, lerr, expectedLine)
 		}
 
 		wgSchedule.Done()
@@ -182,7 +175,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 		case <-closeCh:
 		default:
 			// perr could be nil.
-			return fmt.Errorf("unexpected connection close before server closes: %v", perr)
+			return fmt.Errorf("unexpected connection close before server closes: %w", perr)
 		}
 		return nil
 	}
@@ -194,9 +187,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 			go func(i int) {
 				defer wgDone.Done()
 
-				if err := createWatchConnection(); err != nil {
-					cx.t.Fatalf("testV3CurlMaxStream watch failed: %d, error: %v", i, err)
-				}
+				require.NoErrorf(cx.t, createWatchConnection(), "testCurlV3MaxStream watch failed: %d", i)
 			}(i)
 		}
 
@@ -209,9 +200,7 @@ func submitRangeAfterConcurrentWatch(cx ctlCtx, expectedValue string) {
 	rangeData, err := json.Marshal(&pb.RangeRequest{
 		Key: []byte("foo"),
 	})
-	if err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, err)
 
 	cx.t.Log("Submitting range request...")
 	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{Endpoint: "/v3/kv/range", Value: string(rangeData), Expected: expect.ExpectedResponse{Value: expectedValue}, Timeout: 5}); err != nil {
@@ -225,19 +214,19 @@ func submitRangeAfterConcurrentWatch(cx ctlCtx, expectedValue string) {
 func setRLimit(nofile uint64) (func() error, error) {
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		return nil, fmt.Errorf("failed to get open file limit, error: %v", err)
+		return nil, fmt.Errorf("failed to get open file limit, error: %w", err)
 	}
 
 	var wLimit syscall.Rlimit
 	wLimit.Max = nofile
 	wLimit.Cur = nofile
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &wLimit); err != nil {
-		return nil, fmt.Errorf("failed to set max open file limit, %v", err)
+		return nil, fmt.Errorf("failed to set max open file limit, %w", err)
 	}
 
 	return func() error {
 		if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-			return fmt.Errorf("failed reset max open file limit, %v", err)
+			return fmt.Errorf("failed reset max open file limit, %w", err)
 		}
 		return nil
 	}, nil

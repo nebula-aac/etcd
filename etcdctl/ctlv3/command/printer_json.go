@@ -48,7 +48,7 @@ func (p *jsonPrinter) MemberList(r clientv3.MemberListResponse) {
 	}
 }
 
-func printJSON(v interface{}) {
+func printJSON(v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -97,5 +97,4 @@ func printMemberListWithHexJSON(r clientv3.MemberListResponse) {
 	}
 	buffer.WriteString("}")
 	fmt.Println(buffer.String())
-
 }

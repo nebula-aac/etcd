@@ -22,11 +22,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-
-	"github.com/spf13/cobra"
 )
 
 var txnInteractive bool
@@ -194,7 +194,7 @@ func ParseCompare(line string) (*clientv3.Cmp, error) {
 		return nil, fmt.Errorf("malformed comparison: %s; got %s(%q) %s %q", line, target, key, op, val)
 	}
 	if serr != nil {
-		return nil, fmt.Errorf("malformed comparison: %s (%v)", line, serr)
+		return nil, fmt.Errorf("malformed comparison: %s (%w)", line, serr)
 	}
 
 	var (

@@ -32,11 +32,9 @@ import (
 	"github.com/creack/pty"
 )
 
-const DEBUG_LINES_TAIL = 40
+const debugLinesTail = 40
 
-var (
-	ErrProcessRunning = fmt.Errorf("process is still running")
-)
+var ErrProcessRunning = fmt.Errorf("process is still running")
 
 type ExpectedResponse struct {
 	Value         string
@@ -193,7 +191,7 @@ func (ep *ExpectProcess) ExpectFunc(ctx context.Context, f func(string) bool) (s
 
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("failed to find match string: %w", ctx.Err())
+			return "", fmt.Errorf("context done before matching log found: %w", ctx.Err())
 		case <-time.After(time.Millisecond * 10):
 			// continue loop
 		}
@@ -203,7 +201,7 @@ func (ep *ExpectProcess) ExpectFunc(ctx context.Context, f func(string) bool) (s
 	// NOTE: we wait readCloseCh for ep.read() to complete draining the log before acquring the lock.
 	case <-ep.readCloseCh:
 	case <-ctx.Done():
-		return "", fmt.Errorf("failed to find match string: %w", ctx.Err())
+		return "", fmt.Errorf("context done before to found matching log")
 	}
 
 	ep.mu.Lock()
@@ -218,7 +216,7 @@ func (ep *ExpectProcess) ExpectFunc(ctx context.Context, f func(string) bool) (s
 		}
 	}
 
-	lastLinesIndex := len(ep.lines) - DEBUG_LINES_TAIL
+	lastLinesIndex := len(ep.lines) - debugLinesTail
 	if lastLinesIndex < 0 {
 		lastLinesIndex = 0
 	}

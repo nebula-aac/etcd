@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -32,7 +32,7 @@ import (
 )
 
 func TestPersistLoadClientReports(t *testing.T) {
-	h := model.NewAppendableHistory(identity.NewIdProvider())
+	h := model.NewAppendableHistory(identity.NewIDProvider())
 	baseTime := time.Now()
 
 	start := time.Since(baseTime)
@@ -42,7 +42,7 @@ func TestPersistLoadClientReports(t *testing.T) {
 		Key:         []byte("key"),
 		ModRevision: 2,
 		Value:       []byte("value"),
-	}}})
+	}}}, nil)
 
 	start = time.Since(baseTime)
 	time.Sleep(time.Nanosecond)
@@ -95,19 +95,23 @@ func TestPersistLoadClientReports(t *testing.T) {
 			{
 				Events: []model.WatchEvent{
 					{
-						Event: model.Event{
-							Type:  model.PutOperation,
-							Key:   "key1",
-							Value: model.ToValueOrHash("1"),
+						PersistedEvent: model.PersistedEvent{
+							Event: model.Event{
+								Type:  model.PutOperation,
+								Key:   "key1",
+								Value: model.ToValueOrHash("1"),
+							},
+							Revision: 2,
 						},
-						Revision: 2,
 					},
 					{
-						Event: model.Event{
-							Type: model.DeleteOperation,
-							Key:  "key2",
+						PersistedEvent: model.PersistedEvent{
+							Event: model.Event{
+								Type: model.DeleteOperation,
+								Key:  "key2",
+							},
+							Revision: 3,
 						},
-						Revision: 3,
 					},
 				},
 				IsProgressNotify: false,
@@ -118,12 +122,12 @@ func TestPersistLoadClientReports(t *testing.T) {
 	}
 	reports := []ClientReport{
 		{
-			ClientId: 1,
+			ClientID: 1,
 			KeyValue: h.Operations(),
 			Watch:    []model.WatchOperation{watch},
 		},
 		{
-			ClientId: 2,
+			ClientID: 2,
 			KeyValue: nil,
 			Watch:    []model.WatchOperation{watch},
 		},
@@ -131,7 +135,7 @@ func TestPersistLoadClientReports(t *testing.T) {
 	path := t.TempDir()
 	persistClientReports(t, zaptest.NewLogger(t), path, reports)
 	got, err := LoadClientReports(path)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	if diff := cmp.Diff(reports, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("Reports don't match after persist and load, %s", diff)
 	}

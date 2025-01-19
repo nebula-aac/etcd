@@ -23,48 +23,62 @@ import (
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/robustness/client"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
 	"go.etcd.io/etcd/tests/v3/robustness/model"
+	"go.etcd.io/etcd/tests/v3/robustness/random"
 )
 
 var (
-	EtcdPutDeleteLease = etcdTraffic{
+	EtcdPutDeleteLease Traffic = etcdTraffic{
 		keyCount:     10,
 		leaseTTL:     DefaultLeaseTTL,
 		largePutSize: 32769,
-		requests: []choiceWeight[etcdRequestType]{
-			{choice: Get, weight: 15},
-			{choice: List, weight: 15},
-			{choice: StaleGet, weight: 10},
-			{choice: StaleList, weight: 10},
-			{choice: Put, weight: 23},
-			{choice: LargePut, weight: 2},
-			{choice: Delete, weight: 5},
-			{choice: MultiOpTxn, weight: 5},
-			{choice: PutWithLease, weight: 5},
-			{choice: LeaseRevoke, weight: 5},
-			{choice: CompareAndSet, weight: 5},
+		// Please keep the sum of weights equal 100.
+		requests: []random.ChoiceWeight[etcdRequestType]{
+			{Choice: Get, Weight: 15},
+			{Choice: List, Weight: 15},
+			{Choice: StaleGet, Weight: 10},
+			{Choice: StaleList, Weight: 10},
+			{Choice: Delete, Weight: 5},
+			{Choice: MultiOpTxn, Weight: 5},
+			{Choice: PutWithLease, Weight: 5},
+			{Choice: LeaseRevoke, Weight: 5},
+			{Choice: CompareAndSet, Weight: 5},
+			{Choice: Put, Weight: 20},
+			{Choice: LargePut, Weight: 5},
 		},
 	}
-	EtcdPut = etcdTraffic{
+	EtcdPut Traffic = etcdTraffic{
 		keyCount:     10,
 		largePutSize: 32769,
 		leaseTTL:     DefaultLeaseTTL,
-		requests: []choiceWeight[etcdRequestType]{
-			{choice: Get, weight: 15},
-			{choice: List, weight: 15},
-			{choice: StaleGet, weight: 10},
-			{choice: StaleList, weight: 10},
-			{choice: Put, weight: 40},
-			{choice: MultiOpTxn, weight: 5},
-			{choice: LargePut, weight: 5},
+		// Please keep the sum of weights equal 100.
+		requests: []random.ChoiceWeight[etcdRequestType]{
+			{Choice: Get, Weight: 15},
+			{Choice: List, Weight: 15},
+			{Choice: StaleGet, Weight: 10},
+			{Choice: StaleList, Weight: 10},
+			{Choice: MultiOpTxn, Weight: 5},
+			{Choice: LargePut, Weight: 5},
+			{Choice: Put, Weight: 40},
+		},
+	}
+	EtcdDelete Traffic = etcdTraffic{
+		keyCount:     10,
+		largePutSize: 32769,
+		leaseTTL:     DefaultLeaseTTL,
+		// Please keep the sum of weights equal 100.
+		requests: []random.ChoiceWeight[etcdRequestType]{
+			{Choice: Put, Weight: 50},
+			{Choice: Delete, Weight: 50},
 		},
 	}
 )
 
 type etcdTraffic struct {
 	keyCount     int
-	requests     []choiceWeight[etcdRequestType]
+	requests     []random.ChoiceWeight[etcdRequestType]
 	leaseTTL     int64
 	largePutSize int
 }
@@ -94,7 +108,7 @@ func (t etcdTraffic) Name() string {
 	return "Etcd"
 }
 
-func (t etcdTraffic) Run(ctx context.Context, c *RecordingClient, limiter *rate.Limiter, ids identity.Provider, lm identity.LeaseIdStorage, nonUniqueWriteLimiter ConcurrencyLimiter, finish <-chan struct{}) {
+func (t etcdTraffic) Run(ctx context.Context, c *client.RecordingClient, limiter *rate.Limiter, ids identity.Provider, lm identity.LeaseIDStorage, nonUniqueWriteLimiter ConcurrencyLimiter, finish <-chan struct{}) {
 	lastOperationSucceeded := true
 	var lastRev int64
 	var requestType etcdRequestType
@@ -114,18 +128,20 @@ func (t etcdTraffic) Run(ctx context.Context, c *RecordingClient, limiter *rate.
 			return
 		default:
 		}
+		shouldReturn := false
+
 		// Avoid multiple failed writes in a row
 		if lastOperationSucceeded {
 			choices := t.requests
-			if !nonUniqueWriteLimiter.Take() {
+			if shouldReturn = nonUniqueWriteLimiter.Take(); !shouldReturn {
 				choices = filterOutNonUniqueEtcdWrites(choices)
 			}
-			requestType = pickRandom(choices)
+			requestType = random.PickRandom(choices)
 		} else {
 			requestType = Get
 		}
 		rev, err := client.Request(ctx, requestType, lastRev)
-		if requestType == Delete || requestType == LeaseRevoke {
+		if shouldReturn {
 			nonUniqueWriteLimiter.Return()
 		}
 		lastOperationSucceeded = err == nil
@@ -139,9 +155,9 @@ func (t etcdTraffic) Run(ctx context.Context, c *RecordingClient, limiter *rate.
 	}
 }
 
-func filterOutNonUniqueEtcdWrites(choices []choiceWeight[etcdRequestType]) (resp []choiceWeight[etcdRequestType]) {
+func filterOutNonUniqueEtcdWrites(choices []random.ChoiceWeight[etcdRequestType]) (resp []random.ChoiceWeight[etcdRequestType]) {
 	for _, choice := range choices {
-		if choice.choice != Delete && choice.choice != LeaseRevoke {
+		if choice.Choice != Delete && choice.Choice != LeaseRevoke {
 			resp = append(resp, choice)
 		}
 	}
@@ -151,22 +167,30 @@ func filterOutNonUniqueEtcdWrites(choices []choiceWeight[etcdRequestType]) (resp
 type etcdTrafficClient struct {
 	etcdTraffic
 	keyPrefix    string
-	client       *RecordingClient
+	client       *client.RecordingClient
 	limiter      *rate.Limiter
 	idProvider   identity.Provider
-	leaseStorage identity.LeaseIdStorage
+	leaseStorage identity.LeaseIDStorage
 }
 
 func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType, lastRev int64) (rev int64, err error) {
 	opCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	var limit int64 = 0
+	var limit int64
 	switch request {
 	case StaleGet:
-		_, rev, err = c.client.Get(opCtx, c.randomKey(), lastRev)
+		var resp *clientv3.GetResponse
+		resp, err = c.client.Get(opCtx, c.randomKey(), clientv3.WithRev(lastRev))
+		if err == nil {
+			rev = resp.Header.Revision
+		}
 	case Get:
-		_, rev, err = c.client.Get(opCtx, c.randomKey(), 0)
+		var resp *clientv3.GetResponse
+		resp, err = c.client.Get(opCtx, c.randomKey(), clientv3.WithRev(0))
+		if err == nil {
+			rev = resp.Header.Revision
+		}
 	case List:
 		var resp *clientv3.GetResponse
 		resp, err = c.client.Range(ctx, c.keyPrefix, clientv3.GetPrefixRangeEnd(c.keyPrefix), 0, limit)
@@ -181,13 +205,13 @@ func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType,
 		}
 	case Put:
 		var resp *clientv3.PutResponse
-		resp, err = c.client.Put(opCtx, c.randomKey(), fmt.Sprintf("%d", c.idProvider.NewRequestId()))
+		resp, err = c.client.Put(opCtx, c.randomKey(), fmt.Sprintf("%d", c.idProvider.NewRequestID()))
 		if resp != nil {
 			rev = resp.Header.Revision
 		}
 	case LargePut:
 		var resp *clientv3.PutResponse
-		resp, err = c.client.Put(opCtx, c.randomKey(), randString(c.largePutSize))
+		resp, err = c.client.Put(opCtx, c.randomKey(), random.RandString(c.largePutSize))
 		if resp != nil {
 			rev = resp.Header.Revision
 		}
@@ -199,15 +223,22 @@ func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType,
 		}
 	case MultiOpTxn:
 		var resp *clientv3.TxnResponse
-		resp, err = c.client.Txn(opCtx, nil, c.pickMultiTxnOps(), nil)
+		resp, err = c.client.Txn(opCtx).Then(
+			c.pickMultiTxnOps()...,
+		).Commit()
 		if resp != nil {
 			rev = resp.Header.Revision
 		}
 	case CompareAndSet:
 		var kv *mvccpb.KeyValue
 		key := c.randomKey()
-		kv, rev, err = c.client.Get(opCtx, key, 0)
+		var resp *clientv3.GetResponse
+		resp, err = c.client.Get(opCtx, key, clientv3.WithRev(0))
 		if err == nil {
+			rev = resp.Header.Revision
+			if len(resp.Kvs) == 1 {
+				kv = resp.Kvs[0]
+			}
 			c.limiter.Wait(ctx)
 			var expectedRevision int64
 			if kv != nil {
@@ -215,43 +246,47 @@ func (c etcdTrafficClient) Request(ctx context.Context, request etcdRequestType,
 			}
 			txnCtx, txnCancel := context.WithTimeout(ctx, RequestTimeout)
 			var resp *clientv3.TxnResponse
-			resp, err = c.client.Txn(txnCtx, []clientv3.Cmp{clientv3.Compare(clientv3.ModRevision(key), "=", expectedRevision)}, []clientv3.Op{clientv3.OpPut(key, fmt.Sprintf("%d", c.idProvider.NewRequestId()))}, nil)
+			resp, err = c.client.Txn(txnCtx).If(
+				clientv3.Compare(clientv3.ModRevision(key), "=", expectedRevision),
+			).Then(
+				clientv3.OpPut(key, fmt.Sprintf("%d", c.idProvider.NewRequestID())),
+			).Commit()
 			txnCancel()
 			if resp != nil {
 				rev = resp.Header.Revision
 			}
 		}
 	case PutWithLease:
-		leaseId := c.leaseStorage.LeaseId(c.client.id)
-		if leaseId == 0 {
+		leaseID := c.leaseStorage.LeaseID(c.client.ID)
+		if leaseID == 0 {
 			var resp *clientv3.LeaseGrantResponse
 			resp, err = c.client.LeaseGrant(opCtx, c.leaseTTL)
 			if resp != nil {
-				leaseId = int64(resp.ID)
+				leaseID = int64(resp.ID)
 				rev = resp.ResponseHeader.Revision
 			}
 			if err == nil {
-				c.leaseStorage.AddLeaseId(c.client.id, leaseId)
+				c.leaseStorage.AddLeaseID(c.client.ID, leaseID)
 				c.limiter.Wait(ctx)
 			}
 		}
-		if leaseId != 0 {
+		if leaseID != 0 {
 			putCtx, putCancel := context.WithTimeout(ctx, RequestTimeout)
 			var resp *clientv3.PutResponse
-			resp, err = c.client.PutWithLease(putCtx, c.randomKey(), fmt.Sprintf("%d", c.idProvider.NewRequestId()), leaseId)
+			resp, err = c.client.PutWithLease(putCtx, c.randomKey(), fmt.Sprintf("%d", c.idProvider.NewRequestID()), leaseID)
 			putCancel()
 			if resp != nil {
 				rev = resp.Header.Revision
 			}
 		}
 	case LeaseRevoke:
-		leaseId := c.leaseStorage.LeaseId(c.client.id)
-		if leaseId != 0 {
+		leaseID := c.leaseStorage.LeaseID(c.client.ID)
+		if leaseID != 0 {
 			var resp *clientv3.LeaseRevokeResponse
-			resp, err = c.client.LeaseRevoke(opCtx, leaseId)
-			//if LeaseRevoke has failed, do not remove the mapping.
+			resp, err = c.client.LeaseRevoke(opCtx, leaseID)
+			// if LeaseRevoke has failed, do not remove the mapping.
 			if err == nil {
-				c.leaseStorage.RemoveLeaseId(c.client.id)
+				c.leaseStorage.RemoveLeaseID(c.client.ID)
 			}
 			if resp != nil {
 				rev = resp.Header.Revision
@@ -291,7 +326,7 @@ func (c etcdTrafficClient) pickMultiTxnOps() (ops []clientv3.Op) {
 		case model.RangeOperation:
 			ops = append(ops, clientv3.OpGet(key))
 		case model.PutOperation:
-			value := fmt.Sprintf("%d", c.idProvider.NewRequestId())
+			value := fmt.Sprintf("%d", c.idProvider.NewRequestID())
 			ops = append(ops, clientv3.OpPut(key, value))
 		case model.DeleteOperation:
 			ops = append(ops, clientv3.OpDelete(key))

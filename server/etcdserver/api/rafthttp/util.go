@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-semver/semver"
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-
-	"github.com/coreos/go-semver/semver"
-	"go.uber.org/zap"
 )
 
 var (
@@ -169,7 +169,8 @@ func minClusterVersion(h http.Header) *semver.Version {
 func checkVersionCompatibility(name string, server, minCluster *semver.Version) (
 	localServer *semver.Version,
 	localMinCluster *semver.Version,
-	err error) {
+	err error,
+) {
 	localServer = semver.Must(semver.NewVersion(version.Version))
 	localMinCluster = semver.Must(semver.NewVersion(version.MinClusterVersion))
 	if compareMajorMinorVersion(server, localMinCluster) == -1 {

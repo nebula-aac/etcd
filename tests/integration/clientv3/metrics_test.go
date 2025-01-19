@@ -17,6 +17,7 @@ package clientv3test
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -59,13 +60,11 @@ func TestV3ClientMetrics(t *testing.T) {
 	// listen for all Prometheus metrics
 
 	go func() {
-		var err error
-
 		defer close(donec)
 
-		err = srv.Serve(ln)
-		if err != nil && !transport.IsClosedConnError(err) {
-			t.Errorf("Err serving http requests: %v", err)
+		serr := srv.Serve(ln)
+		if serr != nil && !transport.IsClosedConnError(serr) {
+			t.Errorf("Err serving http requests: %v", serr)
 		}
 	}()
 
@@ -75,7 +74,7 @@ func TestV3ClientMetrics(t *testing.T) {
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
-		Endpoints: []string{clus.Members[0].GRPCURL()},
+		Endpoints: []string{clus.Members[0].GRPCURL},
 		DialOptions: []grpc.DialOption{
 			grpc.WithUnaryInterceptor(grpcprom.UnaryClientInterceptor),
 			grpc.WithStreamInterceptor(grpcprom.StreamClientInterceptor),
@@ -167,11 +166,10 @@ func getHTTPBodyAsLines(t *testing.T, url string) []string {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
-			} else {
-				t.Fatalf("error reading: %v", err)
 			}
+			t.Fatalf("error reading: %v", err)
 		}
 		lines = append(lines, line)
 	}

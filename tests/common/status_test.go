@@ -19,12 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
 func TestStatus(t *testing.T) {
-
 	testRunner.BeforeTest(t)
 
 	for _, tc := range clusterTestCases() {
@@ -37,20 +38,18 @@ func TestStatus(t *testing.T) {
 
 			testutils.ExecuteUntil(ctx, t, func() {
 				rs, err := cc.Status(ctx)
-				if err != nil {
-					t.Fatalf("could not get status, err: %s", err)
-				}
+				require.NoErrorf(t, err, "could not get status")
 				if len(rs) != tc.config.ClusterSize {
 					t.Fatalf("wrong number of status responses. expected:%d, got:%d ", tc.config.ClusterSize, len(rs))
 				}
-				memberIds := make(map[uint64]struct{})
+				memberIDs := make(map[uint64]struct{})
 				for _, r := range rs {
 					if r == nil {
 						t.Fatalf("status response is nil")
 					}
-					memberIds[r.Header.MemberId] = struct{}{}
+					memberIDs[r.Header.MemberId] = struct{}{}
 				}
-				if len(rs) != len(memberIds) {
+				if len(rs) != len(memberIDs) {
 					t.Fatalf("found duplicated members")
 				}
 			})

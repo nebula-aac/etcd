@@ -19,13 +19,13 @@ import (
 	"os"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.etcd.io/raft/v3/raftpb"
-
-	"go.uber.org/zap"
 )
 
 func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
@@ -59,10 +59,10 @@ func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot raftpb.Snapshot, hooks *BackendHooks) (backend.Backend, error) {
 	snapPath, err := ss.DBFilePath(snapshot.Metadata.Index)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find database snapshot file (%v)", err)
+		return nil, fmt.Errorf("failed to find database snapshot file (%w)", err)
 	}
 	if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
-		return nil, fmt.Errorf("failed to rename database snapshot file (%v)", err)
+		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
 	}
 	return OpenBackend(cfg, hooks), nil
 }
@@ -105,8 +105,10 @@ func RecoverSnapshotBackend(cfg config.ServerConfig, oldbe backend.Backend, snap
 		consistentIndex, _ = schema.ReadConsistentIndex(oldbe.ReadTx())
 	}
 	if snapshot.Metadata.Index <= consistentIndex {
+		cfg.Logger.Info("Skipping snapshot backend", zap.Uint64("consistent-index", consistentIndex), zap.Uint64("snapshot-index", snapshot.Metadata.Index))
 		return oldbe, nil
 	}
+	cfg.Logger.Info("Recovering from snapshot backend", zap.Uint64("consistent-index", consistentIndex), zap.Uint64("snapshot-index", snapshot.Metadata.Index))
 	oldbe.Close()
 	return OpenSnapshotBackend(cfg, snap.New(cfg.Logger, cfg.SnapDir()), snapshot, hooks)
 }

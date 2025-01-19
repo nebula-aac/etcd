@@ -16,12 +16,15 @@ package lease_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -38,7 +41,7 @@ func TestLeaseNotFoundError(t *testing.T) {
 	kv := clus.RandClient()
 
 	_, err := kv.Put(context.TODO(), "foo", "bar", clientv3.WithLease(clientv3.LeaseID(500)))
-	if err != rpctypes.ErrLeaseNotFound {
+	if !errors.Is(err, rpctypes.ErrLeaseNotFound) {
 		t.Fatalf("expected %v, got %v", rpctypes.ErrLeaseNotFound, err)
 	}
 }
@@ -54,7 +57,7 @@ func TestLeaseGrant(t *testing.T) {
 	kv := clus.RandClient()
 
 	_, merr := lapi.Grant(context.Background(), clientv3.MaxLeaseTTL+1)
-	if merr != rpctypes.ErrLeaseTTLTooLarge {
+	if !errors.Is(merr, rpctypes.ErrLeaseTTLTooLarge) {
 		t.Fatalf("err = %v, want %v", merr, rpctypes.ErrLeaseTTLTooLarge)
 	}
 
@@ -90,7 +93,7 @@ func TestLeaseRevoke(t *testing.T) {
 	}
 
 	_, err = kv.Put(context.TODO(), "foo", "bar", clientv3.WithLease(resp.ID))
-	if err != rpctypes.ErrLeaseNotFound {
+	if !errors.Is(err, rpctypes.ErrLeaseNotFound) {
 		t.Fatalf("err = %v, want %v", err, rpctypes.ErrLeaseNotFound)
 	}
 }
@@ -114,7 +117,7 @@ func TestLeaseKeepAliveOnce(t *testing.T) {
 	}
 
 	_, err = lapi.KeepAliveOnce(context.Background(), clientv3.LeaseID(0))
-	if err != rpctypes.ErrLeaseNotFound {
+	if !errors.Is(err, rpctypes.ErrLeaseNotFound) {
 		t.Errorf("expected %v, got %v", rpctypes.ErrLeaseNotFound, err)
 	}
 }
@@ -133,7 +136,14 @@ func TestLeaseKeepAlive(t *testing.T) {
 		t.Errorf("failed to create lease %v", err)
 	}
 
-	rc, kerr := lapi.KeepAlive(context.Background(), resp.ID)
+	type uncomparableCtx struct {
+		context.Context
+		_ func()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rc, kerr := lapi.KeepAlive(uncomparableCtx{Context: ctx}, resp.ID)
 	if kerr != nil {
 		t.Errorf("failed to keepalive lease %v", kerr)
 	}
@@ -149,6 +159,26 @@ func TestLeaseKeepAlive(t *testing.T) {
 
 	if kresp.ID != resp.ID {
 		t.Errorf("ID = %x, want %x", kresp.ID, resp.ID)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	rc2, kerr2 := lapi.KeepAlive(uncomparableCtx{Context: ctx2}, resp.ID)
+	if kerr2 != nil {
+		t.Errorf("failed to keepalive lease %v", kerr2)
+	}
+
+	cancel2()
+
+	_, ok = <-rc2
+	if ok {
+		t.Errorf("chan is not closed, want cancel stop keepalive")
+	}
+
+	select {
+	case <-rc:
+		// cancel2() should not affect first keepalive
+		t.Errorf("chan is closed, want keepalive continue")
+	default:
 	}
 
 	lapi.Close()
@@ -407,7 +437,7 @@ func TestLeaseRevokeNewAfterClose(t *testing.T) {
 		t.Fatal("le.Revoke took too long")
 	case errMsg := <-errMsgCh:
 		if errMsg != "" {
-			t.Fatalf(errMsg)
+			t.Fatalf("%v", errMsg)
 		}
 	}
 }
@@ -545,9 +575,8 @@ func TestLeaseTimeToLive(t *testing.T) {
 	kv := clus.RandClient()
 	keys := []string{"foo1", "foo2"}
 	for i := range keys {
-		if _, err = kv.Put(context.TODO(), keys[i], "bar", clientv3.WithLease(resp.ID)); err != nil {
-			t.Fatal(err)
-		}
+		_, err = kv.Put(context.TODO(), keys[i], "bar", clientv3.WithLease(resp.ID))
+		require.NoError(t, err)
 	}
 
 	// linearized read to ensure Puts propagated to server backing lapi
@@ -719,7 +748,8 @@ func TestLeaseKeepAliveLoopExit(t *testing.T) {
 	cli.Close()
 
 	_, err = cli.KeepAlive(ctx, resp.ID)
-	if _, ok := err.(clientv3.ErrKeepAliveHalted); !ok {
+	var keepAliveHaltedErr clientv3.ErrKeepAliveHalted
+	if !errors.As(err, &keepAliveHaltedErr) {
 		t.Fatalf("expected %T, got %v(%T)", clientv3.ErrKeepAliveHalted{}, err, err)
 	}
 }
@@ -761,7 +791,7 @@ func TestV3LeaseFailureOverlap(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				err := updown(n)
-				if err == nil || err == rpctypes.ErrTimeoutDueToConnectionLost {
+				if err == nil || errors.Is(err, rpctypes.ErrTimeoutDueToConnectionLost) {
 					return
 				}
 				t.Error(err)

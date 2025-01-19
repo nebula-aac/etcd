@@ -23,12 +23,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/report"
-
 	"github.com/cheggaaa/pb/v3"
 	"github.com/spf13/cobra"
 	"golang.org/x/time/rate"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/report"
 )
 
 // watchCmd represents the watch command
@@ -233,7 +233,6 @@ func benchPutWatches(clients []*clientv3.Client, wk *watchedKeys) {
 	bar.Finish()
 	close(r.Results())
 	fmt.Printf("Watch events received summary:\n%s", <-rc)
-
 }
 
 func recvWatchChan(wch clientv3.WatchChan, results chan<- report.Result, nrRxed *int32) {

@@ -247,11 +247,10 @@ func TestV3CorruptAlarm(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		presp, perr := clus.Client(0).Put(context.TODO(), "abc", "aaa")
 		if perr != nil {
-			if !eqErrGRPC(perr, rpctypes.ErrCorrupt) {
-				t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
-			} else {
+			if eqErrGRPC(perr, rpctypes.ErrCorrupt) {
 				return
 			}
+			t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
 		}
 		time.Sleep(time.Second)
 	}
@@ -284,13 +283,13 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	putr := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar"), Lease: lresp.ID}
 	// Trigger snapshot from the leader to new member
 	for i := 0; i < 15; i++ {
-		_, err := integration.ToGRPC(clus.RandClient()).KV.Put(ctx, putr)
+		_, err = integration.ToGRPC(clus.RandClient()).KV.Put(ctx, putr)
 		if err != nil {
 			t.Errorf("#%d: couldn't put key (%v)", i, err)
 		}
 	}
 
-	if err := clus.RemoveMember(t, clus.Client(1), uint64(clus.Members[2].ID())); err != nil {
+	if err = clus.RemoveMember(t, clus.Client(1), uint64(clus.Members[2].ID())); err != nil {
 		t.Fatal(err)
 	}
 	clus.WaitMembersForLeader(t, clus.Members)
@@ -314,11 +313,11 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	schema.MustUnsafePutLease(tx, &lpb)
 	tx.Commit()
 
-	if err := be.Close(); err != nil {
+	if err = be.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := clus.Members[2].Restart(t); err != nil {
+	if err = clus.Members[2].Restart(t); err != nil {
 		t.Fatal(err)
 	}
 
@@ -347,10 +346,9 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	time.Sleep(time.Second)
 	presp, perr := clus.Client(0).Put(context.TODO(), "abc", "aaa")
 	if perr != nil {
-		if !eqErrGRPC(perr, rpctypes.ErrCorrupt) {
-			t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
-		} else {
+		if eqErrGRPC(perr, rpctypes.ErrCorrupt) {
 			return
 		}
+		t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
 	}
 }

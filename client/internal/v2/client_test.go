@@ -27,6 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 )
@@ -129,19 +132,12 @@ func TestSimpleHTTPClientDoSuccess(t *testing.T) {
 	}
 
 	resp, body, err := c.Do(context.Background(), &fakeAction{})
-	if err != nil {
-		t.Fatalf("incorrect error value: want=nil got=%v", err)
-	}
-
+	require.NoErrorf(t, err, "incorrect error value")
 	wantCode := http.StatusTeapot
-	if wantCode != resp.StatusCode {
-		t.Fatalf("invalid response code: want=%d got=%d", wantCode, resp.StatusCode)
-	}
+	require.Equalf(t, wantCode, resp.StatusCode, "invalid response code: want=%d got=%d", wantCode, resp.StatusCode)
 
 	wantBody := []byte("foo")
-	if !reflect.DeepEqual(wantBody, body) {
-		t.Fatalf("invalid response body: want=%q got=%q", wantBody, body)
-	}
+	require.Truef(t, reflect.DeepEqual(wantBody, body), "invalid response body: want=%q got=%q", wantBody, body)
 }
 
 func TestSimpleHTTPClientDoError(t *testing.T) {
@@ -151,9 +147,7 @@ func TestSimpleHTTPClientDoError(t *testing.T) {
 	tr.errchan <- errors.New("fixture")
 
 	_, _, err := c.Do(context.Background(), &fakeAction{})
-	if err == nil {
-		t.Fatalf("expected non-nil error, got nil")
-	}
+	assert.Errorf(t, err, "expected non-nil error, got nil")
 }
 
 type nilAction struct{}
@@ -169,9 +163,7 @@ func TestSimpleHTTPClientDoNilRequest(t *testing.T) {
 	tr.errchan <- errors.New("fixture")
 
 	_, _, err := c.Do(context.Background(), &nilAction{})
-	if err != ErrNoRequest {
-		t.Fatalf("expected non-nil error, got nil")
-	}
+	require.ErrorIsf(t, err, ErrNoRequest, "expected non-nil error, got nil")
 }
 
 func TestSimpleHTTPClientDoCancelContext(t *testing.T) {
@@ -182,9 +174,7 @@ func TestSimpleHTTPClientDoCancelContext(t *testing.T) {
 	tr.finishCancel <- struct{}{}
 
 	_, _, err := c.Do(context.Background(), &fakeAction{})
-	if err == nil {
-		t.Fatalf("expected non-nil error, got nil")
-	}
+	assert.Errorf(t, err, "expected non-nil error, got nil")
 }
 
 type checkableReadCloser struct {
@@ -219,13 +209,9 @@ func TestSimpleHTTPClientDoCancelContextResponseBodyClosed(t *testing.T) {
 	}()
 
 	_, _, err := c.Do(ctx, &fakeAction{})
-	if err == nil {
-		t.Fatalf("expected non-nil error, got nil")
-	}
+	require.Errorf(t, err, "expected non-nil error, got nil")
 
-	if !body.closed {
-		t.Fatalf("expected closed body")
-	}
+	require.Truef(t, body.closed, "expected closed body")
 }
 
 type blockingBody struct {
@@ -256,13 +242,9 @@ func TestSimpleHTTPClientDoCancelContextResponseBodyClosedWithBlockingBody(t *te
 	}()
 
 	_, _, err := c.Do(ctx, &fakeAction{})
-	if err != context.Canceled {
-		t.Fatalf("expected %+v, got %+v", context.Canceled, err)
-	}
+	require.ErrorIsf(t, err, context.Canceled, "expected %+v, got %+v", context.Canceled, err)
 
-	if !body.closed {
-		t.Fatalf("expected closed body")
-	}
+	require.Truef(t, body.closed, "expected closed body")
 }
 
 func TestSimpleHTTPClientDoCancelContextWaitForRoundTrip(t *testing.T) {
@@ -289,7 +271,7 @@ func TestSimpleHTTPClientDoCancelContextWaitForRoundTrip(t *testing.T) {
 
 	select {
 	case <-donechan:
-		//expected behavior
+		// expected behavior
 		return
 	case <-time.After(time.Second):
 		t.Fatalf("simpleHTTPClient.Do did not exit within 1s")
@@ -309,16 +291,14 @@ func TestSimpleHTTPClientDoHeaderTimeout(t *testing.T) {
 
 	select {
 	case err := <-errc:
-		if err == nil {
-			t.Fatalf("expected non-nil error, got nil")
-		}
+		require.Errorf(t, err, "expected non-nil error, got nil")
 	case <-time.After(time.Second):
 		t.Fatalf("unexpected timeout when waiting for the test to finish")
 	}
 }
 
 func TestHTTPClusterClientDo(t *testing.T) {
-	fakeErr := errors.New("fake!")
+	fakeErr := errors.New("fake")
 	fakeURL := url.URL{}
 	tests := []struct {
 		client *httpClusterClient
@@ -438,7 +418,7 @@ func TestHTTPClusterClientDo(t *testing.T) {
 			tt.ctx = context.Background()
 		}
 		resp, _, err := tt.client.Do(tt.ctx, nil)
-		if (tt.wantErr == nil && tt.wantErr != err) || (tt.wantErr != nil && tt.wantErr.Error() != err.Error()) {
+		if (tt.wantErr == nil && !errors.Is(err, tt.wantErr)) || (tt.wantErr != nil && tt.wantErr.Error() != err.Error()) {
 			t.Errorf("#%d: got err=%v, want=%v", i, err, tt.wantErr)
 			continue
 		}
@@ -478,7 +458,7 @@ func TestHTTPClusterClientDoDeadlineExceedContext(t *testing.T) {
 
 	select {
 	case err := <-errc:
-		if err != context.DeadlineExceeded {
+		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("err = %+v, want %+v", err, context.DeadlineExceeded)
 		}
 	case <-time.After(time.Second):
@@ -496,12 +476,13 @@ func (f fakeCancelContext) Done() <-chan struct{} {
 	d <- struct{}{}
 	return d
 }
-func (f fakeCancelContext) Err() error                        { return errFakeCancelContext }
-func (f fakeCancelContext) Value(key interface{}) interface{} { return 1 }
+func (f fakeCancelContext) Err() error        { return errFakeCancelContext }
+func (f fakeCancelContext) Value(key any) any { return 1 }
 
-func withTimeout(parent context.Context, timeout time.Duration) (
+func withTimeout(parent context.Context, _timeout time.Duration) (
 	ctx context.Context,
-	cancel context.CancelFunc) {
+	cancel context.CancelFunc,
+) {
 	ctx = parent
 	cancel = func() {
 		ctx = nil
@@ -528,7 +509,7 @@ func TestHTTPClusterClientDoCanceledContext(t *testing.T) {
 
 	select {
 	case err := <-errc:
-		if err != errFakeCancelContext {
+		if !errors.Is(err, errFakeCancelContext) {
 			t.Errorf("err = %+v, want %+v", err, errFakeCancelContext)
 		}
 	case <-time.After(time.Second):
@@ -540,7 +521,7 @@ func TestRedirectedHTTPAction(t *testing.T) {
 	act := &redirectedHTTPAction{
 		action: &staticHTTPAction{
 			request: http.Request{
-				Method: "DELETE",
+				Method: http.MethodDelete,
 				URL: &url.URL{
 					Scheme: "https",
 					Host:   "foo.example.com",
@@ -556,7 +537,7 @@ func TestRedirectedHTTPAction(t *testing.T) {
 	}
 
 	want := &http.Request{
-		Method: "DELETE",
+		Method: http.MethodDelete,
 		URL: &url.URL{
 			Scheme: "https",
 			Host:   "bar.example.com",
@@ -565,9 +546,7 @@ func TestRedirectedHTTPAction(t *testing.T) {
 	}
 	got := act.HTTPRequest(url.URL{Scheme: "http", Host: "baz.example.com", Path: "/pang"})
 
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("HTTPRequest is %#v, want %#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "HTTPRequest is %#v, want %#v", want, got)
 }
 
 func TestRedirectFollowingHTTPClient(t *testing.T) {
@@ -583,11 +562,11 @@ func TestRedirectFollowingHTTPClient(t *testing.T) {
 			client: &multiStaticHTTPClient{
 				responses: []staticHTTPResponse{
 					{
-						err: errors.New("fail!"),
+						err: errors.New("fail"),
 					},
 				},
 			},
-			wantErr: errors.New("fail!"),
+			wantErr: errors.New("fail"),
 		},
 
 		// no need to follow redirect if none given
@@ -723,7 +702,9 @@ func TestRedirectFollowingHTTPClient(t *testing.T) {
 					},
 				},
 			},
+			//revive:disable:error-strings
 			wantErr: errors.New("location header not valid URL: :"),
+			//revive:enable:error-strings
 		},
 
 		// fail if redirects checked way too many times
@@ -742,7 +723,7 @@ func TestRedirectFollowingHTTPClient(t *testing.T) {
 	for i, tt := range tests {
 		client := &redirectFollowingHTTPClient{client: tt.client, checkRedirect: tt.checkRedirect}
 		resp, _, err := client.Do(context.Background(), nil)
-		if (tt.wantErr == nil && tt.wantErr != err) || (tt.wantErr != nil && tt.wantErr.Error() != err.Error()) {
+		if (tt.wantErr == nil && !errors.Is(err, tt.wantErr)) || (tt.wantErr != nil && tt.wantErr.Error() != err.Error()) {
 			t.Errorf("#%d: got err=%v, want=%v", i, err, tt.wantErr)
 			continue
 		}
@@ -794,43 +775,31 @@ func TestHTTPClusterClientSync(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:2379"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 
 	want := []string{"http://127.0.0.1:2379"}
 	got := hc.Endpoints()
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("incorrect endpoints: want=%#v got=%#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "incorrect endpoints: want=%#v got=%#v", want, got)
 
 	err = hc.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error during Sync: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during Sync: %#v", err)
 
 	want = []string{"http://127.0.0.1:2379", "http://127.0.0.1:4001", "http://127.0.0.1:4002", "http://127.0.0.1:4003"}
 	got = hc.Endpoints()
 	sort.Strings(got)
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("incorrect endpoints post-Sync: want=%#v got=%#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "incorrect endpoints post-Sync: want=%#v got=%#v", want, got)
 
 	err = hc.SetEndpoints([]string{"http://127.0.0.1:4009"})
-	if err != nil {
-		t.Fatalf("unexpected error during reset: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during reset: %#v", err)
 
 	want = []string{"http://127.0.0.1:4009"}
 	got = hc.Endpoints()
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("incorrect endpoints post-reset: want=%#v got=%#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "incorrect endpoints post-reset: want=%#v got=%#v", want, got)
 }
 
 func TestHTTPClusterClientSyncFail(t *testing.T) {
 	cf := newStaticHTTPClientFactory([]staticHTTPResponse{
-		{err: errors.New("fail!")},
+		{err: errors.New("fail")},
 	})
 
 	hc := &httpClusterClient{
@@ -838,25 +807,17 @@ func TestHTTPClusterClientSyncFail(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:2379"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 
 	want := []string{"http://127.0.0.1:2379"}
 	got := hc.Endpoints()
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("incorrect endpoints: want=%#v got=%#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "incorrect endpoints: want=%#v got=%#v", want, got)
 
 	err = hc.Sync(context.Background())
-	if err == nil {
-		t.Fatalf("got nil error during Sync")
-	}
+	require.Errorf(t, err, "got nil error during Sync")
 
 	got = hc.Endpoints()
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("incorrect endpoints after failed Sync: want=%#v got=%#v", want, got)
-	}
+	require.Truef(t, reflect.DeepEqual(want, got), "incorrect endpoints after failed Sync: want=%#v got=%#v", want, got)
 }
 
 func TestHTTPClusterClientAutoSyncCancelContext(t *testing.T) {
@@ -872,21 +833,18 @@ func TestHTTPClusterClientAutoSyncCancelContext(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:2379"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	err = hc.AutoSync(ctx, time.Hour)
-	if err != context.Canceled {
-		t.Fatalf("incorrect error value: want=%v got=%v", context.Canceled, err)
-	}
+	require.ErrorIsf(t, err, context.Canceled, "incorrect error value: want=%v got=%v", context.Canceled, err)
 }
 
 func TestHTTPClusterClientAutoSyncFail(t *testing.T) {
 	cf := newStaticHTTPClientFactory([]staticHTTPResponse{
-		{err: errors.New("fail!")},
+		{err: errors.New("fail")},
 	})
 
 	hc := &httpClusterClient{
@@ -894,14 +852,10 @@ func TestHTTPClusterClientAutoSyncFail(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:2379"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 
 	err = hc.AutoSync(context.Background(), time.Hour)
-	if !strings.HasPrefix(err.Error(), ErrClusterUnavailable.Error()) {
-		t.Fatalf("incorrect error value: want=%v got=%v", ErrClusterUnavailable, err)
-	}
+	require.Truef(t, strings.HasPrefix(err.Error(), ErrClusterUnavailable.Error()), "incorrect error value: want=%v got=%v", ErrClusterUnavailable, err)
 }
 
 func TestHTTPClusterClientGetVersion(t *testing.T) {
@@ -918,9 +872,7 @@ func TestHTTPClusterClientGetVersion(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:4003", "http://127.0.0.1:2379", "http://127.0.0.1:4001", "http://127.0.0.1:4002"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 
 	actual, err := hc.GetVersion(context.Background())
 	if err != nil {
@@ -955,16 +907,12 @@ func TestHTTPClusterClientSyncPinEndpoint(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:4003", "http://127.0.0.1:2379", "http://127.0.0.1:4001", "http://127.0.0.1:4002"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 	pinnedEndpoint := hc.endpoints[hc.pinned]
 
 	for i := 0; i < 3; i++ {
 		err = hc.Sync(context.Background())
-		if err != nil {
-			t.Fatalf("#%d: unexpected error during Sync: %#v", i, err)
-		}
+		require.NoErrorf(t, err, "#%d: unexpected error during Sync", i)
 
 		if g := hc.endpoints[hc.pinned]; g != pinnedEndpoint {
 			t.Errorf("#%d: pinned endpoint = %v, want %v", i, g, pinnedEndpoint)
@@ -995,16 +943,12 @@ func TestHTTPClusterClientSyncUnpinEndpoint(t *testing.T) {
 		rand:          rand.New(rand.NewSource(0)),
 	}
 	err := hc.SetEndpoints([]string{"http://127.0.0.1:4003", "http://127.0.0.1:2379", "http://127.0.0.1:4001", "http://127.0.0.1:4002"})
-	if err != nil {
-		t.Fatalf("unexpected error during setup: %#v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error during setup")
 	wants := []string{"http://127.0.0.1:2379", "http://127.0.0.1:4001", "http://127.0.0.1:4002"}
 
 	for i := 0; i < 3; i++ {
 		err = hc.Sync(context.Background())
-		if err != nil {
-			t.Fatalf("#%d: unexpected error during Sync: %#v", i, err)
-		}
+		require.NoErrorf(t, err, "#%d: unexpected error during Sync", i)
 
 		if g := hc.endpoints[hc.pinned]; g.String() != wants[i] {
 			t.Errorf("#%d: pinned endpoint = %v, want %v", i, g, wants[i])
@@ -1045,9 +989,7 @@ func TestHTTPClusterClientSyncPinLeaderEndpoint(t *testing.T) {
 
 	for i, want := range wants {
 		err := hc.Sync(context.Background())
-		if err != nil {
-			t.Fatalf("#%d: unexpected error during Sync: %#v", i, err)
-		}
+		require.NoErrorf(t, err, "#%d: unexpected error during Sync", i)
 
 		pinned := hc.endpoints[hc.pinned].String()
 		if pinned != want {
@@ -1080,9 +1022,7 @@ func TestHTTPClusterClientResetPinRandom(t *testing.T) {
 	for i := 0; i < round; i++ {
 		hc := &httpClusterClient{rand: rand.New(rand.NewSource(int64(i)))}
 		err := hc.SetEndpoints([]string{"http://127.0.0.1:4001", "http://127.0.0.1:4002", "http://127.0.0.1:4003"})
-		if err != nil {
-			t.Fatalf("#%d: reset error (%v)", i, err)
-		}
+		require.NoErrorf(t, err, "#%d: reset error", i)
 		if hc.endpoints[hc.pinned].String() == "http://127.0.0.1:4001" {
 			pinNum++
 		}
